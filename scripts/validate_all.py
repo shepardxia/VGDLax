@@ -45,17 +45,6 @@ ALL_GAMES = [
     "portals", "boulderdash", "survivezombies", "frogs",
 ]
 
-KNOWN_RELAXED = {
-    "chase": {0, 1, 3},
-    "zelda": {3, 7},
-    "aliens": {1, 3, 6},
-    "missilecommand": {2, 4},
-    "portals": {2, 3, 4, 10},
-    "boulderdash": {0, 2, 5, 7, 8},
-    "survivezombies": {4, 6, 7},
-    "frogs": {6, 7, 8},
-}
-
 TRAJECTORY_TYPES = ["noop", "cycling", "random"]
 
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "validation_results")
@@ -92,30 +81,16 @@ def _make_actions(traj_type, n_actions, n_steps, seed=42):
 # ── Classification ───────────────────────────────────────────────────────────
 
 
-def _classify_result(result, relaxed_types):
+def _classify_result(result):
     """Classify a TrajectoryResult into a status string.
 
     Returns one of:
-        'exact_match'   - all steps match with no relaxation
-        'relaxed_match' - all steps match with known relaxed types
-        'state_error'   - at least one step diverges even with relaxation
+        'match'       - all steps match exactly
+        'state_error' - at least one step diverges
     """
-    all_exact = all(sc.matches for sc in result.steps)
-    if all_exact:
-        return "exact_match"
-
-    # Check with relaxed types: filter diffs to only non-relaxed, non-cascade
-    for sc in result.steps:
-        if sc.matches:
-            continue
-        real_diffs = [
-            d for d in sc.diffs
-            if not d.startswith("done:") and not d.startswith("score:")
-        ]
-        if real_diffs:
-            return "state_error"
-
-    return "relaxed_match"
+    if all(sc.matches for sc in result.steps):
+        return "match"
+    return "state_error"
 
 
 # ── Per-game validation ─────────────────────────────────────────────────────
@@ -129,9 +104,8 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
         dict with keys: status, trajectories, errors, timing
     """
     game_result = {
-        "status": "exact_match",
+        "status": "match",
         "trajectories": {},
-        "known_diffs": sorted(KNOWN_RELAXED.get(game_name, set())),
         "errors": [],
         "timing_s": 0.0,
     }
@@ -148,9 +122,8 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
         game_result["timing_s"] = time.time() - t0
         return game_result
 
-    relaxed = KNOWN_RELAXED.get(game_name, set())
-    worst_status = "exact_match"
-    status_rank = {"exact_match": 0, "relaxed_match": 1, "state_error": 2, "compile_error": 3}
+    worst_status = "match"
+    status_rank = {"match": 0, "state_error": 1, "compile_error": 2}
 
     for traj_type in TRAJECTORY_TYPES:
         traj_key = f"trajectory_{traj_type}"
@@ -163,11 +136,9 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
             result = run_comparison(
                 game_name, actions, seed=seed,
                 use_rng_replay=use_rng,
-                relaxed_types=relaxed,
-                round_positions=True,
             )
 
-            status = _classify_result(result, relaxed)
+            status = _classify_result(result)
 
             # Collect per-step data
             step_data = []
@@ -242,15 +213,13 @@ def write_results(all_results, output_dir):
 
     # Aggregate summary
     total = len(all_results)
-    fully_valid = sum(1 for r in all_results.values() if r["status"] == "exact_match")
-    relaxed_valid = sum(1 for r in all_results.values() if r["status"] == "relaxed_match")
+    matching = sum(1 for r in all_results.values() if r["status"] == "match")
     state_errors = sum(1 for r in all_results.values() if r["status"] == "state_error")
     compile_errors = sum(1 for r in all_results.values() if r["status"] == "compile_error")
 
     summary = {
         "total_games": total,
-        "fully_valid": fully_valid,
-        "relaxed_valid": relaxed_valid,
+        "matching": matching,
         "state_errors": state_errors,
         "compile_errors": compile_errors,
     }
@@ -260,7 +229,6 @@ def write_results(all_results, output_dir):
     for game_name, result in all_results.items():
         per_game_summary[game_name] = {
             "status": result["status"],
-            "known_diffs": result["known_diffs"],
             "timing_s": result["timing_s"],
             "trajectories": {
                 ttype: {
@@ -310,8 +278,7 @@ def write_results(all_results, output_dir):
 
 
 _STATUS_SYMBOL = {
-    "exact_match": r"\checkmark",
-    "relaxed_match": r"$\sim$",
+    "match": r"\checkmark",
     "state_error": r"$\times$",
     "compile_error": r"\textbf{ERR}",
     "unknown": "?",
@@ -321,12 +288,12 @@ _STATUS_SYMBOL = {
 def _traj_cell(traj_data):
     """Format a trajectory result for the LaTeX table.
 
-    Returns a string like '\\checkmark' or '$\\sim$ (3/30)' showing
-    the number of failing steps if not an exact match.
+    Returns a string like '\\checkmark' or '$\\times$ (3/30)' showing
+    the number of failing steps.
     """
     status = traj_data.get("status", "unknown")
     symbol = _STATUS_SYMBOL.get(status, "?")
-    if status in ("exact_match", "compile_error", "unknown"):
+    if status in ("match", "compile_error", "unknown"):
         return symbol
 
     failing = traj_data.get("failing_steps", 0)
@@ -354,8 +321,7 @@ def generate_latex(results_json_path, output_dir):
     lines.append(r"\begin{table}[ht]")
     lines.append(r"\centering")
     lines.append(r"\caption{Cross-engine validation: py-vgdl vs vgdl-jax. "
-                 r"\checkmark\ = exact match, $\sim$ = relaxed match "
-                 r"(known-divergent types excluded), "
+                 r"\checkmark\ = match, "
                  r"$\times$ = state error. "
                  r"Parenthetical shows (failing steps / total steps).}")
     lines.append(r"\label{tab:validation-summary}")
@@ -396,11 +362,11 @@ def generate_latex(results_json_path, output_dir):
 
     # Summary row
     total = summary["total_games"]
-    exact = summary["fully_valid"]
-    relaxed = summary["relaxed_valid"]
+    matching = summary["matching"]
+    errors = summary["state_errors"]
     lines.append(
         f"\\textbf{{Total}} & & & & & "
-        f"{exact}/{total} exact, {relaxed}/{total} relaxed \\\\"
+        f"{matching}/{total} match, {errors}/{total} diverge \\\\"
     )
 
     lines.append(r"\bottomrule")
@@ -425,8 +391,7 @@ def print_summary(all_results):
     print("=" * 70)
 
     status_icons = {
-        "exact_match": "[EXACT]  ",
-        "relaxed_match": "[RELAX]  ",
+        "match": "[MATCH]  ",
         "state_error": "[FAIL]   ",
         "compile_error": "[ERROR]  ",
     }
@@ -453,13 +418,11 @@ def print_summary(all_results):
 
     # Totals
     total = len(all_results)
-    exact = sum(1 for r in all_results.values() if r["status"] == "exact_match")
-    relaxed = sum(1 for r in all_results.values() if r["status"] == "relaxed_match")
+    matching = sum(1 for r in all_results.values() if r["status"] == "match")
     errors = sum(1 for r in all_results.values()
                  if r["status"] in ("state_error", "compile_error"))
     print()
-    print(f"  Total: {total} games | "
-          f"Exact: {exact} | Relaxed: {relaxed} | Errors: {errors}")
+    print(f"  Total: {total} games | Match: {matching} | Errors: {errors}")
     print("=" * 70)
 
 
@@ -612,8 +575,7 @@ def main():
                                render_diffs=args.render_diffs,
                                output_dir=output_dir)
         all_results[game_name] = result
-        icon = {"exact_match": "exact", "relaxed_match": "relaxed",
-                "state_error": "FAIL", "compile_error": "ERROR"}
+        icon = {"match": "ok", "state_error": "FAIL", "compile_error": "ERROR"}
         print(f" {icon.get(result['status'], '?')} ({result['timing_s']:.1f}s)")
 
     # ── Write outputs ──

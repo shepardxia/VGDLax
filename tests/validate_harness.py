@@ -43,24 +43,16 @@ class TrajectoryResult:
     level: int  # highest passing validation level (0-4)
 
 
-def compare_states(state_a, state_b, relaxed_types=None, round_positions=False):
+def compare_states(state_a, state_b):
     """Field-by-field comparison of two normalized state dicts.
 
     Args:
         state_a: from extract_pyvgdl_state or extract_jax_state
         state_b: from extract_pyvgdl_state or extract_jax_state
-        relaxed_types: set of type_idx where only alive_count + score are checked
-            (useful for types with known divergence like chasers)
-        round_positions: if True, round positions to nearest int before comparing.
-            Useful for cross-engine comparison where py-vgdl has sub-grid
-            positions from speed != 1.0 and vgdl-jax uses integer grid coords.
 
     Returns:
         (matches: bool, diffs: list[str])
     """
-    if relaxed_types is None:
-        relaxed_types = set()
-
     diffs = []
 
     # Score
@@ -85,18 +77,12 @@ def compare_states(state_a, state_b, relaxed_types=None, round_positions=False):
 
         key = ta.get('key', tb.get('key', f'type_{tidx}'))
 
-        if tidx in relaxed_types:
-            continue
-
         if ta['alive_count'] != tb['alive_count']:
             diffs.append(
                 f"{key}(t{tidx}): alive_count {ta['alive_count']} vs {tb['alive_count']}")
 
         pos_a = ta['positions']
         pos_b = tb['positions']
-        if round_positions:
-            pos_a = sorted([(round(r), round(c)) for r, c in pos_a])
-            pos_b = sorted([(round(r), round(c)) for r, c in pos_b])
         if pos_a != pos_b:
             diffs.append(
                 f"{key}(t{tidx}): positions differ "
@@ -296,8 +282,7 @@ def run_jax_trajectory(game_name, actions, seed=42):
     return states
 
 
-def run_comparison(game_name, actions, seed=42, use_rng_replay=False,
-                   relaxed_types=None, round_positions=False):
+def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
     """Run both engines on same actions, compare state at every step.
 
     Args:
@@ -305,8 +290,6 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False,
         actions: list of int action indices
         seed: random seed
         use_rng_replay: if True, record JAX RNG sequence and inject into py-vgdl
-        relaxed_types: set of type_idx for position-relaxed comparison
-        round_positions: if True, round positions to nearest int before comparing
 
     Returns:
         TrajectoryResult with per-step StepComparison.
@@ -344,7 +327,7 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False,
     # ── Compare initial state ──
     pv_state = extract_pyvgdl_state(game, sprite_key_order, block_size)
     jx_state = extract_jax_state(jax_state, game_def)
-    matches, diffs = compare_states(pv_state, jx_state, relaxed_types, round_positions)
+    matches, diffs = compare_states(pv_state, jx_state)
 
     step_comparisons = [StepComparison(
         step=0, action=-1,
@@ -373,7 +356,7 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False,
 
         pv_state = extract_pyvgdl_state(game, sprite_key_order, block_size)
         jx_state = extract_jax_state(jax_state, game_def)
-        matches, diffs = compare_states(pv_state, jx_state, relaxed_types, round_positions)
+        matches, diffs = compare_states(pv_state, jx_state)
 
         step_comparisons.append(StepComparison(
             step=i + 1, action=action_idx,

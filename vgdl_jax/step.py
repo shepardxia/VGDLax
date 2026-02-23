@@ -411,6 +411,9 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         return state.replace(score=state.score + score_delta)
 
     elif effect_type == 'kill_if_has_less':
+        # Kill type_a if its resource value <= limit.
+        # NOTE: py-vgdl's docstring says "less than" but the code uses <=,
+        # so resource == limit also triggers the kill. We match that behavior.
         r_idx = kwargs.get('resource_idx', 0)
         limit = kwargs.get('limit', 0)
         cur = state.resources[type_a, :, r_idx]
@@ -421,6 +424,9 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         )
 
     elif effect_type == 'kill_if_has_more':
+        # Kill type_a if its resource value >= limit.
+        # NOTE: py-vgdl's docstring says "more than" but the code uses >=,
+        # so resource == limit also triggers the kill. We match that behavior.
         r_idx = kwargs.get('resource_idx', 0)
         limit = kwargs.get('limit', 0)
         cur = state.resources[type_a, :, r_idx]
@@ -431,7 +437,8 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         )
 
     elif effect_type == 'kill_if_other_has_more':
-        # Kill type_a if type_b (partner) has more than limit of resource
+        # Kill type_a if type_b (partner) has resource >= limit.
+        # NOTE: py-vgdl uses >= despite docstring saying "more than".
         r_idx = kwargs.get('resource_idx', 0)
         limit = kwargs.get('limit', 0)
         if type_b >= 0:
@@ -453,6 +460,8 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         )
 
     elif effect_type == 'kill_if_other_has_less':
+        # Kill type_a if type_b (partner) has resource <= limit.
+        # NOTE: py-vgdl uses <= despite docstring saying "less than".
         r_idx = kwargs.get('resource_idx', 0)
         limit = kwargs.get('limit', 0)
         if type_b >= 0:

@@ -48,24 +48,6 @@ STOCHASTIC_GAMES = [
     "portals", "boulderdash", "survivezombies", "frogs",
 ]
 
-# Known types with position divergence due to architectural differences:
-# - Chaser/Fleeing: distance-field vs Manhattan tiebreak
-# - Speed→cooldown: py-vgdl sub-grid movement vs vgdl-jax discrete steps
-# - Spawn timing: SpawnPoint/Bomber cooldown differences
-# - Cascading: movement timing differences can cause different collisions/deaths
-# Maps game_name → set of type_idx that get relaxed comparison
-KNOWN_RELAXED = {
-    "chase": {0, 1, 3},              # catcher, fleeing, scared
-    "zelda": {3, 7},                  # sword (spawn), monsterNormal (RandomNPC)
-    "aliens": {1, 3, 6},              # base, sam (missile), alienBlue (Bomber)
-    "missilecommand": {2, 4},         # explosion (flicker), incoming_slow (Chaser)
-    "portals": {2, 3, 4, 10},         # random, vertical, horizontal, avatar (cascade)
-    "boulderdash": {0, 2, 5, 7, 8},   # sword, dirt (cascade), boulder, crab, butterfly
-    "survivezombies": {4, 6, 7},      # honey (spawn), bee (RandomNPC), zombie (Chaser)
-    "frogs": {6, 7, 8},               # log, fastRtruck, slowRtruck (speed→cooldown)
-}
-
-
 # ── Level 0: Game loads ──────────────────────────────────────────────
 
 
@@ -294,45 +276,21 @@ def test_cross_engine_deterministic(game):
 
 @pytest.mark.parametrize("game", STOCHASTIC_GAMES)
 def test_cross_engine_with_rng_replay(game):
-    """Stochastic games with RNG replay, relaxed for known-divergent types.
-
-    Uses round_positions=True because py-vgdl has sub-grid fractional positions
-    from speed != 1.0 physics, while vgdl-jax uses integer grid coords (speed
-    is converted to cooldown at compile time).
-
-    Games with cascading divergences (e.g., bullet timing → avatar death) may
-    also see done/score differences. We filter these from the failing diff list.
-    """
+    """Stochastic games with RNG replay — strict comparison, no relaxation."""
     compiled, _ = _setup_jax_game(game)
 
     # Use NOOP to isolate NPC behavior
     noop_idx = compiled.n_actions - 1
     actions = [noop_idx] * 20
 
-    relaxed = KNOWN_RELAXED.get(game, set())
-    result = run_comparison(
-        game, actions, seed=42,
-        use_rng_replay=True,
-        relaxed_types=relaxed,
-        round_positions=True,
-    )
+    result = run_comparison(game, actions, seed=42, use_rng_replay=True)
 
-    # Filter out done/score diffs caused by cascading divergences in relaxed types
-    failing_steps = []
-    for s in result.steps:
-        if s.matches:
-            continue
-        # Keep only diffs that are NOT done/score (those cascade from relaxed types)
-        real_diffs = [d for d in s.diffs
-                      if not d.startswith('done:') and not d.startswith('score:')]
-        if real_diffs:
-            failing_steps.append((s.step, real_diffs))
-
+    failing_steps = [s for s in result.steps if not s.matches]
     assert len(failing_steps) == 0, (
-        f"{game}: {len(failing_steps)} steps diverged with RNG replay "
-        f"(relaxed types: {relaxed}):\n" +
+        f"{game}: {len(failing_steps)}/{len(result.steps)} steps diverged "
+        f"with RNG replay:\n" +
         "\n".join(
-            f"  step {step}: {diffs}" for step, diffs in failing_steps[:5]
+            f"  step {s.step}: {s.diffs}" for s in failing_steps[:5]
         )
     )
 
