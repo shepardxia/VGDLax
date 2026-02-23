@@ -1,0 +1,46 @@
+import jax
+import jax.numpy as jnp
+import flax.struct
+
+
+@flax.struct.dataclass
+class GameState:
+    positions: jnp.ndarray       # [n_types, max_n, 2] float32
+    alive: jnp.ndarray           # [n_types, max_n] bool
+    orientations: jnp.ndarray    # [n_types, max_n, 2] float32
+    speeds: jnp.ndarray          # [n_types, max_n] float32
+    cooldown_timers: jnp.ndarray # [n_types, max_n] int32
+    ages: jnp.ndarray            # [n_types, max_n] int32
+    spawn_counts: jnp.ndarray    # [n_types, max_n] int32
+    resources: jnp.ndarray       # [n_types, max_n, n_resource_types] int32
+    velocities: jnp.ndarray      # [n_types, max_n, 2] float32
+    passive_forces: jnp.ndarray  # [n_types, max_n, 2] float32
+    score: jnp.int32
+    step_count: jnp.int32
+    done: jnp.bool_
+    win: jnp.bool_
+    rng: jnp.ndarray             # PRNGKey
+
+
+def create_initial_state(n_types, max_n, height, width,
+                         n_resource_types=0, rng_key=None):
+    if rng_key is None:
+        rng_key = jax.random.PRNGKey(0)
+    n_res = max(n_resource_types, 1)  # at least 1 to keep shape valid
+    return GameState(
+        positions=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
+        alive=jnp.zeros((n_types, max_n), dtype=jnp.bool_),
+        orientations=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
+        speeds=jnp.zeros((n_types, max_n), dtype=jnp.float32),
+        cooldown_timers=jnp.zeros((n_types, max_n), dtype=jnp.int32),
+        ages=jnp.zeros((n_types, max_n), dtype=jnp.int32),
+        spawn_counts=jnp.zeros((n_types, max_n), dtype=jnp.int32),
+        resources=jnp.zeros((n_types, max_n, n_res), dtype=jnp.int32),
+        velocities=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
+        passive_forces=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
+        score=jnp.int32(0),
+        step_count=jnp.int32(0),
+        done=jnp.bool_(False),
+        win=jnp.bool_(False),
+        rng=rng_key,
+    )

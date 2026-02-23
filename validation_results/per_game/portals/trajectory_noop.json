@@ -1,0 +1,140 @@
+{
+  "status": "relaxed_match",
+  "n_steps": 20,
+  "actual_steps": 21,
+  "level": 3,
+  "steps": [
+    {
+      "step": 0,
+      "action": -1,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 1,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 2,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 3,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 4,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 5,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 6,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 7,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 8,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 9,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 10,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 11,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 12,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 13,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 14,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 15,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 16,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 17,
+      "action": 4,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 18,
+      "action": 4,
+      "matches": false,
+      "diffs": [
+        "done: False vs True"
+      ]
+    },
+    {
+      "step": 19,
+      "action": 4,
+      "matches": false,
+      "diffs": [
+        "done: False vs True"
+      ]
+    },
+    {
+      "step": 20,
+      "action": 4,
+      "matches": false,
+      "diffs": [
+        "done: False vs True"
+      ]
+    }
+  ]
+}

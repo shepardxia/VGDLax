@@ -1,0 +1,633 @@
+"""
+Standalone VGDL text parser — no py-vgdl/pygame dependency.
+Reads .txt game files and level files, produces a GameDef.
+"""
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple, Any
+
+from vgdl_jax.data_model import (
+    SpriteClass, EffectType, TerminationType,
+    SpriteDef, EffectDef, TerminationDef, LevelDef, GameDef,
+)
+
+
+# ── Class name → SpriteClass mapping ──────────────────────────────────
+
+CLASS_MAP = {
+    'Immovable': SpriteClass.IMMOVABLE,
+    'Immutable': SpriteClass.IMMOVABLE,
+    'Passive': SpriteClass.PASSIVE,
+    'ResourcePack': SpriteClass.RESOURCE,
+    'Resource': SpriteClass.RESOURCE,
+    'Missile': SpriteClass.MISSILE,
+    'RandomNPC': SpriteClass.RANDOM_NPC,
+    'Chaser': SpriteClass.CHASER,
+    'AStarChaser': SpriteClass.CHASER,
+    'Fleeing': SpriteClass.FLEEING,
+    'Flicker': SpriteClass.FLICKER,
+    'OrientedFlicker': SpriteClass.ORIENTED_FLICKER,
+    'SpawnPoint': SpriteClass.SPAWN_POINT,
+    'Bomber': SpriteClass.BOMBER,
+    'Walker': SpriteClass.WALKER,
+    'Portal': SpriteClass.PORTAL,
+    'MovingAvatar': SpriteClass.MOVING_AVATAR,
+    'FlakAvatar': SpriteClass.FLAK_AVATAR,
+    'ShootAvatar': SpriteClass.SHOOT_AVATAR,
+    'HorizontalAvatar': SpriteClass.HORIZONTAL_AVATAR,
+    'VerticalAvatar': SpriteClass.HORIZONTAL_AVATAR,
+    'OrientedAvatar': SpriteClass.ORIENTED_AVATAR,
+    'RotatingAvatar': SpriteClass.ORIENTED_AVATAR,
+    'InertialAvatar': SpriteClass.INERTIAL_AVATAR,
+    'MarioAvatar': SpriteClass.MARIO_AVATAR,
+}
+
+EFFECT_MAP = {
+    'killSprite': EffectType.KILL_SPRITE,
+    'killBoth': EffectType.KILL_BOTH,
+    'stepBack': EffectType.STEP_BACK,
+    'transformTo': EffectType.TRANSFORM_TO,
+    'turnAround': EffectType.TURN_AROUND,
+    'reverseDirection': EffectType.REVERSE_DIRECTION,
+    'changeResource': EffectType.CHANGE_RESOURCE,
+    'collectResource': EffectType.COLLECT_RESOURCE,
+    'killIfHasLess': EffectType.KILL_IF_HAS_LESS,
+    'killIfHasMore': EffectType.KILL_IF_HAS_MORE,
+    'killIfOtherHasMore': EffectType.KILL_IF_OTHER_HAS_MORE,
+    'killIfOtherHasLess': EffectType.KILL_IF_OTHER_HAS_LESS,
+    'killIfFromAbove': EffectType.KILL_IF_FROM_ABOVE,
+    'wrapAround': EffectType.WRAP_AROUND,
+    'bounceForward': EffectType.BOUNCE_FORWARD,
+    'undoAll': EffectType.UNDO_ALL,
+    'teleportToExit': EffectType.TELEPORT_TO_EXIT,
+    'pullWithIt': EffectType.PULL_WITH_IT,
+    'wallStop': EffectType.WALL_STOP,
+    'wallBounce': EffectType.WALL_BOUNCE,
+    'bounceDirection': EffectType.BOUNCE_DIRECTION,
+}
+
+# py-vgdl uses Vector2(x, y) with screen coords: UP=(0,-1), DOWN=(0,1)
+# Our JAX format uses (row, col): UP=(-1,0), DOWN=(1,0)
+ORIENTATION_MAP = {
+    'UP': (-1.0, 0.0),
+    'DOWN': (1.0, 0.0),
+    'LEFT': (0.0, -1.0),
+    'RIGHT': (0.0, 1.0),
+}
+
+# ── Color constants (matching py-vgdl ontology/constants.py) ─────────
+
+COLOR_MAP = {
+    'GREEN': (0, 200, 0),
+    'BLUE': (0, 0, 200),
+    'RED': (200, 0, 0),
+    'GRAY': (90, 90, 90),
+    'WHITE': (250, 250, 250),
+    'BROWN': (140, 120, 100),
+    'BLACK': (0, 0, 0),
+    'ORANGE': (250, 160, 0),
+    'YELLOW': (250, 250, 0),
+    'PINK': (250, 200, 200),
+    'GOLD': (250, 212, 0),
+    'LIGHTRED': (250, 50, 50),
+    'LIGHTORANGE': (250, 200, 100),
+    'LIGHTBLUE': (50, 100, 250),
+    'LIGHTGREEN': (50, 250, 50),
+    'LIGHTGRAY': (150, 150, 150),
+    'DARKGRAY': (30, 30, 30),
+    'DARKBLUE': (20, 20, 100),
+}
+
+# Default color per py-vgdl class name (matches ontology class definitions)
+DEFAULT_CLASS_COLORS = {
+    'Immovable': (90, 90, 90),       # GRAY
+    'Immutable': (90, 90, 90),       # GRAY
+    'Passive': (200, 0, 0),          # RED
+    'ResourcePack': (90, 90, 90),    # GRAY
+    'Resource': (200, 0, 0),         # RED
+    'Missile': (250, 250, 250),      # WHITE
+    'RandomNPC': (250, 250, 250),    # WHITE
+    'Chaser': (250, 250, 250),       # WHITE
+    'AStarChaser': (250, 250, 250),  # WHITE
+    'Fleeing': (250, 250, 250),      # WHITE
+    'Flicker': (200, 0, 0),          # RED
+    'OrientedFlicker': (200, 0, 0),  # RED
+    'SpawnPoint': (0, 0, 0),         # BLACK
+    'Bomber': (250, 160, 0),         # ORANGE
+    'Walker': (250, 250, 250),       # WHITE
+    'MovingAvatar': (250, 250, 250), # WHITE
+    'FlakAvatar': (0, 200, 0),       # GREEN
+    'ShootAvatar': (250, 250, 250),  # WHITE
+    'HorizontalAvatar': (250, 250, 250),
+    'VerticalAvatar': (250, 250, 250),
+    'OrientedAvatar': (250, 250, 250),
+    'RotatingAvatar': (250, 250, 250),
+    'InertialAvatar': (250, 250, 250),
+    'MarioAvatar': (250, 250, 250),
+}
+
+
+# ── Indent tree parser ────────────────────────────────────────────────
+
+class Node:
+    """Lightweight indented tree node."""
+    def __init__(self, content, indent, parent=None):
+        self.content = content
+        self.indent = indent
+        self.children = []
+        self.parent = None
+        if parent:
+            parent.insert(self)
+
+    def insert(self, node):
+        if self.indent < node.indent:
+            if self.children:
+                assert self.children[0].indent == node.indent
+            self.children.append(node)
+            node.parent = self
+        else:
+            assert self.parent, 'Root node too indented'
+            self.parent.insert(node)
+
+    def get_root(self):
+        if self.parent:
+            return self.parent.get_root()
+        return self
+
+
+def indent_tree_parser(s, tabsize=8):
+    """Parse an indented string into a tree of Nodes."""
+    s = s.expandtabs(tabsize)
+    s = s.replace('(', ' ').replace(')', ' ').replace(',', ' ')
+    last = Node("", -1)
+    for line in s.split("\n"):
+        if '#' in line:
+            line = line.split('#')[0]
+        content = line.strip()
+        if content:
+            indent = len(line) - len(line.lstrip())
+            last = Node(content, indent, last)
+    return last.get_root()
+
+
+# ── Value parser ──────────────────────────────────────────────────────
+
+def _parse_value(val_str):
+    """Try to interpret a value string as a Python literal or known constant."""
+    # Check orientation constants
+    if val_str in ORIENTATION_MAP:
+        return val_str  # Keep as string, convert later
+    # Boolean
+    if val_str in ('True', 'true'):
+        return True
+    if val_str in ('False', 'false'):
+        return False
+    # Number
+    try:
+        return int(val_str)
+    except ValueError:
+        pass
+    try:
+        return float(val_str)
+    except ValueError:
+        pass
+    # String (class name, sprite key, etc.)
+    return val_str
+
+
+def _parse_args(s):
+    """Parse 'ClassName key=val key=val ...' into (class_name, kwargs)."""
+    parts = [x.strip() for x in s.split() if x.strip()]
+    if not parts:
+        return None, {}
+    class_name = None
+    kwargs = {}
+    start = 0
+    if parts and '=' not in parts[0]:
+        class_name = parts[0]
+        start = 1
+    for part in parts[start:]:
+        if '=' in part:
+            k, v = part.split('=', 1)
+            kwargs[k] = _parse_value(v)
+    return class_name, kwargs
+
+
+# ── Section parsers ───────────────────────────────────────────────────
+
+def _parse_sprites(nodes, parent_class=None, parent_args=None, parent_types=None):
+    """
+    Recursively parse SpriteSet nodes.
+    Returns list of (key, class_name, args, stypes, is_leaf) tuples.
+    """
+    if parent_args is None:
+        parent_args = {}
+    if parent_types is None:
+        parent_types = []
+
+    results = []
+    for node in nodes:
+        assert '>' in node.content, f"Sprite line missing '>': {node.content}"
+        key, sdef = [x.strip() for x in node.content.split('>', 1)]
+        class_name, args = _parse_args(sdef)
+        # Inherit parent class and args
+        if class_name is None:
+            class_name = parent_class
+        merged_args = {**parent_args, **args}
+        stypes = parent_types + [key]
+
+        if not node.children:
+            # Leaf node — actual sprite type
+            results.append((key, class_name, merged_args, stypes))
+        else:
+            # Non-leaf — recurse
+            results.extend(_parse_sprites(
+                node.children, class_name, merged_args, stypes))
+    return results
+
+
+def _parse_interactions(nodes):
+    """Parse InteractionSet nodes into list of (actor, actee, effect_name, kwargs)."""
+    results = []
+    for node in nodes:
+        if '>' not in node.content:
+            continue
+        pair, edef = [x.strip() for x in node.content.split('>', 1)]
+        effect_name, kwargs = _parse_args(edef)
+        objs = [x.strip() for x in pair.split() if x.strip()]
+        actor = objs[0]
+        for actee in objs[1:]:
+            results.append((actor, actee, effect_name, kwargs))
+    return results
+
+
+def _parse_mappings(nodes):
+    """Parse LevelMapping nodes into char → [key, ...] dict."""
+    mapping = {}
+    for node in nodes:
+        if '>' not in node.content:
+            continue
+        c, val = [x.strip() for x in node.content.split('>', 1)]
+        assert len(c) == 1, f"Only single character mappings allowed, got '{c}'"
+        keys = [x.strip() for x in val.split() if x.strip()]
+        mapping[c] = keys
+    return mapping
+
+
+def _parse_terminations(nodes):
+    """Parse TerminationSet nodes into list of (class_name, kwargs)."""
+    results = []
+    for node in nodes:
+        class_name, kwargs = _parse_args(node.content)
+        results.append((class_name, kwargs))
+    return results
+
+
+# ── SpriteDef builder ─────────────────────────────────────────────────
+
+def _build_sprite_def(key, class_name, args, stypes, type_idx):
+    """Convert parsed sprite data into a SpriteDef."""
+    # Map class name to SpriteClass enum
+    sc = CLASS_MAP.get(class_name, SpriteClass.IMMOVABLE)
+
+    # Extract known parameters with class-based defaults
+    # In py-vgdl: MovingAvatar, RandomNPC, Chaser, Fleeing, Missile, Walker, Bomber
+    # all default to speed=1
+    SPEED_1_CLASSES = {
+        SpriteClass.MOVING_AVATAR, SpriteClass.ORIENTED_AVATAR,
+        SpriteClass.HORIZONTAL_AVATAR, SpriteClass.FLAK_AVATAR,
+        SpriteClass.SHOOT_AVATAR, SpriteClass.RANDOM_NPC,
+        SpriteClass.CHASER, SpriteClass.FLEEING,
+        SpriteClass.MISSILE, SpriteClass.WALKER, SpriteClass.BOMBER,
+        SpriteClass.INERTIAL_AVATAR, SpriteClass.MARIO_AVATAR,
+    }
+    default_speed = 1.0 if sc in SPEED_1_CLASSES else 0.0
+    speed = args.get('speed', default_speed)
+    if speed is None:
+        speed = default_speed
+    speed = float(speed)
+
+    cooldown = int(args.get('cooldown', 0))
+
+    # Orientation
+    ori_val = args.get('orientation', None)
+    if isinstance(ori_val, str) and ori_val in ORIENTATION_MAP:
+        orientation = ORIENTATION_MAP[ori_val]
+    else:
+        orientation = (0.0, 1.0)  # default RIGHT in (row, col)
+
+    is_static = sc in (SpriteClass.IMMOVABLE, SpriteClass.PASSIVE,
+                       SpriteClass.RESOURCE, SpriteClass.PORTAL)
+
+    singleton = bool(args.get('singleton', False))
+
+    # Flicker limit — only applies to Flicker/OrientedFlicker classes
+    # (For Resource sprites, 'limit' means resource capacity, not expiry)
+    if sc in (SpriteClass.FLICKER, SpriteClass.ORIENTED_FLICKER):
+        flicker_limit = int(args.get('limit', 0))
+    else:
+        flicker_limit = 0
+
+    # Spawner stype (for SpawnPoint, Bomber, ShootAvatar, FlakAvatar, Chaser, Fleeing)
+    spawner_stype = args.get('stype', None)
+    if isinstance(spawner_stype, str):
+        spawner_stype = spawner_stype
+    else:
+        spawner_stype = None
+
+    spawner_prob = float(args.get('prob', 1.0))
+    spawner_total = int(args.get('total', 0))
+
+    # Color: explicit override from game file > class default > white fallback
+    color_val = args.get('color', None)
+    if isinstance(color_val, str) and color_val in COLOR_MAP:
+        color = COLOR_MAP[color_val]
+    elif class_name and class_name in DEFAULT_CLASS_COLORS:
+        color = DEFAULT_CLASS_COLORS[class_name]
+    else:
+        color = (250, 250, 250)  # WHITE fallback
+
+    # Sprite image path (e.g. "oryx/alien1")
+    img = args.get('img', None)
+    if isinstance(img, str):
+        img = img
+    else:
+        img = None
+
+    # Shrinkfactor: default 0.0 for all types.
+    # Note: py-vgdl's Avatar mixin sets shrinkfactor=0.15, but VGDLSprite
+    # sets shrinkfactor=0.0 and wins via MRO (MovingAvatar -> VGDLSprite -> Avatar).
+    # So the actual runtime default for avatars is 0.0, matching non-avatars.
+    shrinkfactor = float(args.get('shrinkfactor', 0.0))
+
+    # Resource fields
+    resource_name = None
+    resource_value = 1
+    resource_limit = 1
+    if sc == SpriteClass.RESOURCE:
+        # Resource sprites use their key as the resource name
+        resource_name = key
+        resource_value = int(args.get('value', 1))
+        resource_limit = int(args.get('limit', 1))
+        # res_type override
+        if 'res_type' in args:
+            resource_name = str(args['res_type'])
+
+    # Portal fields
+    portal_exit_stype = None
+    if sc == SpriteClass.PORTAL:
+        portal_exit_stype = args.get('stype', None)
+
+    # Physics type inference
+    physics_type = 'grid'
+    if sc == SpriteClass.INERTIAL_AVATAR:
+        physics_type = 'continuous'
+    elif sc == SpriteClass.MARIO_AVATAR:
+        physics_type = 'gravity'
+    # Explicit physicstype kwarg overrides
+    pt_kwarg = args.get('physicstype', None)
+    if pt_kwarg == 'ContinuousPhysics':
+        physics_type = 'continuous'
+    elif pt_kwarg == 'GravityPhysics':
+        physics_type = 'gravity'
+
+    mass = float(args.get('mass', 1.0))
+    strength = float(args.get('strength', 3.0 if sc == SpriteClass.MARIO_AVATAR else 1.0))
+    jump_strength = float(args.get('jump_strength', 10.0))
+    airsteering = bool(args.get('airsteering', False))
+
+    return SpriteDef(
+        key=key,
+        type_idx=type_idx,
+        sprite_class=sc,
+        stypes=stypes,
+        speed=speed,
+        orientation=orientation,
+        cooldown=cooldown,
+        is_static=is_static,
+        singleton=singleton,
+        flicker_limit=flicker_limit,
+        spawner_stype=spawner_stype,
+        spawner_prob=spawner_prob,
+        spawner_total=spawner_total,
+        color=color,
+        img=img,
+        shrinkfactor=shrinkfactor,
+        resource_name=resource_name,
+        resource_value=resource_value,
+        resource_limit=resource_limit,
+        portal_exit_stype=portal_exit_stype,
+        physics_type=physics_type,
+        mass=mass,
+        strength=strength,
+        jump_strength=jump_strength,
+        airsteering=airsteering,
+    )
+
+
+# ── EffectDef builder ─────────────────────────────────────────────────
+
+def _build_effect_def(actor, actee, effect_name, kwargs):
+    """Convert parsed effect data into an EffectDef."""
+    et = EFFECT_MAP.get(effect_name, EffectType.NULL)
+    score_change = int(kwargs.get('scoreChange', 0))
+
+    # Pass through relevant kwargs for each effect type
+    eff_kwargs = {}
+    if et == EffectType.TRANSFORM_TO and 'stype' in kwargs:
+        eff_kwargs['stype'] = kwargs['stype']
+    elif et in (EffectType.CHANGE_RESOURCE,):
+        if 'resource' in kwargs:
+            eff_kwargs['resource'] = kwargs['resource']
+        if 'value' in kwargs:
+            eff_kwargs['value'] = int(kwargs['value'])
+    elif et == EffectType.COLLECT_RESOURCE:
+        pass  # resolved at compile time from the Resource SpriteDef
+    elif et in (EffectType.KILL_IF_HAS_LESS, EffectType.KILL_IF_HAS_MORE):
+        if 'resource' in kwargs:
+            eff_kwargs['resource'] = kwargs['resource']
+        if 'limit' in kwargs:
+            eff_kwargs['limit'] = int(kwargs['limit'])
+    elif et in (EffectType.KILL_IF_OTHER_HAS_MORE, EffectType.KILL_IF_OTHER_HAS_LESS):
+        if 'resource' in kwargs:
+            eff_kwargs['resource'] = kwargs['resource']
+        if 'limit' in kwargs:
+            eff_kwargs['limit'] = int(kwargs['limit'])
+    elif et == EffectType.TELEPORT_TO_EXIT:
+        pass  # resolved at compile time from portal's stype
+    elif et in (EffectType.WALL_STOP, EffectType.WALL_BOUNCE,
+                EffectType.BOUNCE_DIRECTION):
+        if 'friction' in kwargs:
+            eff_kwargs['friction'] = float(kwargs['friction'])
+
+    return EffectDef(
+        effect_type=et,
+        actor_stype=actor,
+        actee_stype=actee,
+        score_change=score_change,
+        kwargs=eff_kwargs,
+    )
+
+
+# ── TerminationDef builder ───────────────────────────────────────────
+
+def _build_termination_def(class_name, kwargs):
+    """Convert parsed termination data into a TerminationDef."""
+    if class_name == 'SpriteCounter':
+        return TerminationDef(
+            term_type=TerminationType.SPRITE_COUNTER,
+            win=bool(kwargs.get('win', False)),
+            score_change=int(kwargs.get('scoreChange', 0)),
+            kwargs={
+                'stype': kwargs.get('stype', ''),
+                'limit': int(kwargs.get('limit', 0)),
+            },
+        )
+    elif class_name == 'MultiSpriteCounter':
+        # stypeN=... kwargs
+        stypes = {}
+        for k, v in kwargs.items():
+            if k.startswith('stype'):
+                stypes[k] = v
+        return TerminationDef(
+            term_type=TerminationType.MULTI_SPRITE_COUNTER,
+            win=bool(kwargs.get('win', False)),
+            score_change=int(kwargs.get('scoreChange', 0)),
+            kwargs={
+                'stypes': list(stypes.values()),
+                'limit': int(kwargs.get('limit', 0)),
+            },
+        )
+    elif class_name == 'Timeout':
+        return TerminationDef(
+            term_type=TerminationType.TIMEOUT,
+            win=bool(kwargs.get('win', False)),
+            score_change=int(kwargs.get('scoreChange', 0)),
+            kwargs={
+                'limit': int(kwargs.get('limit', 0)),
+            },
+        )
+    else:
+        # Unknown termination — treat as timeout with limit=0
+        return TerminationDef(
+            term_type=TerminationType.TIMEOUT,
+            win=bool(kwargs.get('win', False)),
+            score_change=int(kwargs.get('scoreChange', 0)),
+            kwargs={'limit': int(kwargs.get('limit', 0))},
+        )
+
+
+# ── Level parser ──────────────────────────────────────────────────────
+
+def _parse_level(level_str, char_mapping, sprite_key_to_idx):
+    """Parse a level string into a LevelDef."""
+    lines = [l for l in level_str.split('\n') if l.strip()]
+    height = len(lines)
+    width = max(len(l) for l in lines) if lines else 0
+
+    initial_sprites = []
+    for row, line in enumerate(lines):
+        for col, c in enumerate(line):
+            keys = char_mapping.get(c, [])
+            for key in keys:
+                if key in sprite_key_to_idx:
+                    initial_sprites.append((sprite_key_to_idx[key], row, col))
+
+    return LevelDef(height=height, width=width, initial_sprites=initial_sprites)
+
+
+# ── Main entry point ──────────────────────────────────────────────────
+
+def parse_vgdl(game_file, level_file=None):
+    """
+    Parse a VGDL game file (and optional level file) into a GameDef.
+
+    Args:
+        game_file: path to the .txt game definition file
+        level_file: path to the _lvlN.txt level file (optional)
+
+    Returns:
+        GameDef
+    """
+    with open(game_file) as f:
+        game_text = f.read()
+
+    level_text = None
+    if level_file:
+        with open(level_file) as f:
+            level_text = f.read()
+
+    return parse_vgdl_text(game_text, level_text)
+
+
+def parse_vgdl_text(game_text, level_text=None):
+    """
+    Parse VGDL game text (and optional level text) into a GameDef.
+    """
+    tree = indent_tree_parser(game_text)
+    # The root's first child is the game node (e.g. "BasicGame")
+    game_node = tree.children[0]
+
+    raw_sprites = []
+    raw_interactions = []
+    # Default mapping matching py-vgdl's BasicGame.__init__ (core.py:501)
+    raw_mappings = {'w': ['wall'], 'A': ['avatar']}
+    raw_terminations = []
+
+    for section in game_node.children:
+        header = section.content.strip().split()[0]
+        if header == 'SpriteSet':
+            raw_sprites = _parse_sprites(section.children)
+        elif header == 'InteractionSet':
+            raw_interactions = _parse_interactions(section.children)
+        elif header == 'LevelMapping':
+            # Merge with defaults — explicit mappings override
+            raw_mappings.update(_parse_mappings(section.children))
+        elif header == 'TerminationSet':
+            raw_terminations = _parse_terminations(section.children)
+
+    # Build SpriteDefs with assigned type indices
+    sprite_defs = []
+    sprite_order = []
+    for i, (key, class_name, args, stypes) in enumerate(raw_sprites):
+        sd = _build_sprite_def(key, class_name, args, stypes, type_idx=i)
+        sprite_defs.append(sd)
+        sprite_order.append(key)
+
+    # Build key → type_idx lookup
+    key_to_idx = {sd.key: sd.type_idx for sd in sprite_defs}
+
+    # Build stype_to_indices: maps each stype name → list of type indices
+    stype_to_indices = defaultdict(list)
+    for sd in sprite_defs:
+        for stype in sd.stypes:
+            if stype != sd.key:  # parent types
+                stype_to_indices[stype].append(sd.type_idx)
+        # The key itself maps to just this sprite
+        stype_to_indices[sd.key].append(sd.type_idx)
+
+    # Build EffectDefs
+    effect_defs = []
+    for actor, actee, effect_name, kwargs in raw_interactions:
+        ed = _build_effect_def(actor, actee, effect_name, kwargs)
+        effect_defs.append(ed)
+
+    # Build TerminationDefs
+    term_defs = []
+    for class_name, kwargs in raw_terminations:
+        td = _build_termination_def(class_name, kwargs)
+        term_defs.append(td)
+
+    # Parse level if provided
+    level_def = None
+    if level_text:
+        level_def = _parse_level(level_text, raw_mappings, key_to_idx)
+
+    return GameDef(
+        sprites=sprite_defs,
+        effects=effect_defs,
+        terminations=term_defs,
+        level=level_def,
+        char_mapping=raw_mappings,
+        sprite_order=sprite_order,
+        stype_to_indices=dict(stype_to_indices),
+    )

@@ -1,0 +1,94 @@
+import os
+import pytest
+import numpy as np
+import jax
+
+try:
+    import pygame
+    HAS_PYGAME = True
+except ImportError:
+    HAS_PYGAME = False
+
+from vgdl_jax.parser import parse_vgdl
+from vgdl_jax.compiler import compile_game
+
+GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
+
+
+@pytest.mark.skipif(not HAS_PYGAME, reason="pygame not installed")
+def test_render_pygame_shape():
+    """Pygame renderer returns correct shape."""
+    from vgdl_jax.render import render_pygame
+
+    gd = parse_vgdl(
+        os.path.join(GAMES_DIR, 'chase.txt'),
+        os.path.join(GAMES_DIR, 'chase_lvl0.txt'),
+    )
+    compiled = compile_game(gd)
+    state = compiled.init_state.replace(rng=jax.random.PRNGKey(0))
+    block_size = 10
+
+    img = render_pygame(state, gd, block_size)
+    H, W = gd.level.height, gd.level.width
+    assert img.shape == (H * block_size, W * block_size, 3)
+    assert img.dtype == np.uint8
+
+
+@pytest.mark.skipif(not HAS_PYGAME, reason="pygame not installed")
+def test_render_pygame_has_walls():
+    """Pygame renderer draws walls (not all white)."""
+    from vgdl_jax.render import render_pygame
+
+    gd = parse_vgdl(
+        os.path.join(GAMES_DIR, 'chase.txt'),
+        os.path.join(GAMES_DIR, 'chase_lvl0.txt'),
+    )
+    compiled = compile_game(gd)
+    state = compiled.init_state.replace(rng=jax.random.PRNGKey(0))
+
+    img = render_pygame(state, gd, block_size=10)
+    assert not np.all(img == 255)
+
+
+@pytest.mark.skipif(not HAS_PYGAME, reason="pygame not installed")
+@pytest.mark.xfail(reason="JAX renderer only does color blocks; pygame renderer now draws sprite images")
+def test_render_pygame_matches_jax():
+    """Pygame renderer and JAX renderer produce the same output at block_size=1."""
+    import jax.numpy as jnp
+    from vgdl_jax.render import render_pygame, render_rgb
+    from vgdl_jax.env import VGDLJaxEnv
+
+    game_file = os.path.join(GAMES_DIR, 'chase.txt')
+    level_file = os.path.join(GAMES_DIR, 'chase_lvl0.txt')
+    env = VGDLJaxEnv(game_file, level_file)
+    gd = env.compiled.game_def
+
+    rng = jax.random.PRNGKey(0)
+    obs, state = env.reset(rng)
+
+    # Both renderers with same block_size
+    jax_img = np.asarray(env.render(state, block_size=10))
+    pygame_img = render_pygame(state, gd, block_size=10)
+
+    np.testing.assert_array_equal(jax_img, pygame_img)
+
+
+@pytest.mark.skipif(not HAS_PYGAME, reason="pygame not installed")
+def test_render_pygame_with_sprites():
+    """Pygame renderer draws sprite images when available."""
+    from vgdl_jax.render import render_pygame
+
+    gd = parse_vgdl(
+        os.path.join(GAMES_DIR, 'chase.txt'),
+        os.path.join(GAMES_DIR, 'chase_lvl0.txt'),
+    )
+    compiled = compile_game(gd)
+    state = compiled.init_state.replace(rng=jax.random.PRNGKey(0))
+
+    img = render_pygame(state, gd, block_size=24)
+    assert img.shape == (gd.level.height * 24, gd.level.width * 24, 3)
+    assert img.dtype == np.uint8
+    # With sprite images, the rendering should have more color variety
+    # than solid blocks (images have alpha blending, gradients, etc.)
+    unique_colors = len(np.unique(img.reshape(-1, 3), axis=0))
+    assert unique_colors > 10  # solid blocks would have very few unique colors

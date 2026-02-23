@@ -1,0 +1,20 @@
+{
+  "status": "exact_match",
+  "n_steps": 20,
+  "actual_steps": 2,
+  "level": 4,
+  "steps": [
+    {
+      "step": 0,
+      "action": -1,
+      "matches": true,
+      "diffs": []
+    },
+    {
+      "step": 1,
+      "action": 0,
+      "matches": true,
+      "diffs": []
+    }
+  ]
+}
