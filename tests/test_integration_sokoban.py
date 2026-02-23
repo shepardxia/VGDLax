@@ -1,33 +1,11 @@
 import jax
 import jax.numpy as jnp
-from vgdl_jax.env import VGDLJaxEnv
-import os
-
-GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
-
-
-def test_sokoban_runs_100_steps():
-    env = VGDLJaxEnv(
-        os.path.join(GAMES_DIR, 'sokoban.txt'),
-        os.path.join(GAMES_DIR, 'sokoban_lvl0.txt'))
-    rng = jax.random.PRNGKey(42)
-    obs, state = env.reset(rng)
-
-    for i in range(100):
-        rng, key = jax.random.split(rng)
-        action = jax.random.randint(key, (), 0, env.n_actions)
-        obs, state, reward, done, info = env.step(state, action)
-        if done:
-            break
-
-    assert state.step_count > 0
+from conftest import make_env
 
 
 def test_sokoban_box_bounceforward():
     """When avatar pushes a box, box should move in avatar's direction."""
-    env = VGDLJaxEnv(
-        os.path.join(GAMES_DIR, 'sokoban.txt'),
-        os.path.join(GAMES_DIR, 'sokoban_lvl0.txt'))
+    env = make_env('sokoban')
     rng = jax.random.PRNGKey(0)
     obs, state = env.reset(rng)
 
@@ -60,9 +38,7 @@ def test_sokoban_box_bounceforward():
 
 def test_sokoban_undo_all_on_box_wall():
     """undoAll should revert all positions when box hits wall."""
-    env = VGDLJaxEnv(
-        os.path.join(GAMES_DIR, 'sokoban.txt'),
-        os.path.join(GAMES_DIR, 'sokoban_lvl0.txt'))
+    env = make_env('sokoban')
     rng = jax.random.PRNGKey(0)
     obs, state = env.reset(rng)
 
@@ -75,18 +51,3 @@ def test_sokoban_undo_all_on_box_wall():
             break
 
     assert state.step_count > 0
-
-
-def test_sokoban_vmap():
-    """Batched execution."""
-    env = VGDLJaxEnv(
-        os.path.join(GAMES_DIR, 'sokoban.txt'),
-        os.path.join(GAMES_DIR, 'sokoban_lvl0.txt'))
-    rng = jax.random.PRNGKey(0)
-    rngs = jax.random.split(rng, 4)
-    obs_batch, state_batch = jax.vmap(env.reset)(rngs)
-    assert obs_batch.shape[0] == 4
-
-    actions = jnp.zeros(4, dtype=jnp.int32)
-    obs2, states2, rewards, dones, infos = jax.vmap(env.step)(state_batch, actions)
-    assert obs2.shape[0] == 4

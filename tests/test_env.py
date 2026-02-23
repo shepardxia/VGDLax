@@ -1,9 +1,8 @@
+import os
 import jax
 import jax.numpy as jnp
 from vgdl_jax.env import VGDLJaxEnv
-import os
-
-GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
+from conftest import GAMES_DIR
 
 
 def test_env_reset():

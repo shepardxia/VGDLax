@@ -17,6 +17,7 @@ PYVGDL_DIR = os.path.join(TESTS_DIR, '..', '..', 'py-vgdl')
 if PYVGDL_DIR not in sys.path:
     sys.path.insert(0, PYVGDL_DIR)
 
+from conftest import GAMES_DIR
 from validate_harness import (
     validate_pyvgdl_loads,
     validate_pyvgdl_state_extraction,
@@ -29,7 +30,6 @@ from validate_harness import (
     _setup_jax_game,
     _get_sprite_configs_from_compiled,
     _get_effects_from_compiled,
-    GAMES_DIR,
     BLOCK_SIZE,
 )
 from state_extractor import extract_pyvgdl_state

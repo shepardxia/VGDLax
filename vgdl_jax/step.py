@@ -8,27 +8,16 @@ masks over the sprite arrays.
 """
 import jax
 import jax.numpy as jnp
-from functools import partial
-
 from vgdl_jax.state import GameState
 from vgdl_jax.collision import detect_eos
-from vgdl_jax.sprites import DIRECTION_DELTAS, spawn_sprite
-from vgdl_jax.data_model import SpriteClass
-
-
-# Sprite classes that never move and should be skipped in NPC update
-_STATIC_CLASSES = {
-    SpriteClass.IMMOVABLE, SpriteClass.PASSIVE,
-    SpriteClass.RESOURCE, SpriteClass.PORTAL,
-}
-
-# Avatar classes handled by _update_avatar
-_AVATAR_CLASSES = {
-    SpriteClass.MOVING_AVATAR, SpriteClass.FLAK_AVATAR,
-    SpriteClass.SHOOT_AVATAR, SpriteClass.HORIZONTAL_AVATAR,
-    SpriteClass.ORIENTED_AVATAR,
-    SpriteClass.INERTIAL_AVATAR, SpriteClass.MARIO_AVATAR,
-}
+from vgdl_jax.sprites import (
+    DIRECTION_DELTAS, spawn_sprite,
+    update_inertial_avatar, update_mario_avatar,
+    update_missile, update_random_npc, update_chaser,
+    update_spawn_point,
+)
+from vgdl_jax.terminations import check_all_terminations
+from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES
 
 
 def build_step_fn(effects, terminations, sprite_configs, avatar_config, params):
@@ -81,7 +70,6 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params):
         # 2. Update avatar (dispatch based on compile-time physics_type)
         avatar_physics = avatar_config.get('physics_type', 'grid')
         if avatar_physics == 'continuous':
-            from vgdl_jax.sprites import update_inertial_avatar
             state = update_inertial_avatar(
                 state, action,
                 avatar_type=avatar_config['avatar_type_idx'],
@@ -90,7 +78,6 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params):
                 strength=avatar_config['strength'],
                 height=height, width=width)
         elif avatar_physics == 'gravity':
-            from vgdl_jax.sprites import update_mario_avatar
             state = update_mario_avatar(
                 state, action,
                 avatar_type=avatar_config['avatar_type_idx'],
@@ -106,9 +93,9 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params):
         # 3. Update NPC sprites
         for type_idx, cfg in enumerate(sprite_configs):
             sc = cfg['sprite_class']
-            if sc in _AVATAR_CLASSES:
+            if sc in AVATAR_CLASSES:
                 continue
-            if sc in _STATIC_CLASSES:
+            if sc in STATIC_CLASSES:
                 continue
             state = _update_npc(state, type_idx, cfg, height, width)
 
@@ -129,7 +116,6 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params):
                                    n_resource_types, resource_limits)
 
         # 6. Check terminations
-        from vgdl_jax.terminations import check_all_terminations
         state, done, win = check_all_terminations(state, terminations)
 
         state = state.replace(
@@ -149,16 +135,63 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params):
     return jax.jit(step)
 
 
+# ── Shared helpers ─────────────────────────────────────────────────────
+
+
+def _in_bounds(ipos, height, width):
+    """Check which sprites have positions within the grid. Returns [max_n] bool."""
+    return (
+        (ipos[:, 0] >= 0) & (ipos[:, 0] < height) &
+        (ipos[:, 1] >= 0) & (ipos[:, 1] < width)
+    )
+
+
+def _get_partner_coords(state, type_b, height, width):
+    """Get int32 positions, clipped coords, and in-bounds mask for type_b sprites.
+
+    Returns (ipos_b, r_b, c_b, in_bounds_b).
+    """
+    ipos_b = state.positions[type_b].astype(jnp.int32)
+    r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
+    c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
+    in_bounds_b = _in_bounds(ipos_b, height, width)
+    return ipos_b, r_b, c_b, in_bounds_b
+
+
+def _apply_partner_delta(state, prev_positions, type_a, type_b, mask,
+                          height, width, score_delta):
+    """Apply type_b's movement delta to type_a sprites (used by bounceForward/pullWithIt)."""
+    if type_b >= 0:
+        b_delta = (state.positions[type_b] - prev_positions[type_b]).astype(jnp.int32)
+        ipos_b, r_b, c_b, _ = _get_partner_coords(state, type_b, height, width)
+        delta_grid = jnp.zeros((height, width, 2), dtype=jnp.int32)
+        alive_b_expanded = (state.alive[type_b])[:, None]
+        delta_grid = delta_grid.at[r_b, c_b].set(
+            jnp.where(alive_b_expanded, b_delta, 0))
+        pos_a = state.positions[type_a]
+        ipos_a = pos_a.astype(jnp.int32)
+        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
+        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
+        partner_delta = delta_grid[r_a, c_a]
+        new_pos = jnp.where(mask[:, None], pos_a + partner_delta, pos_a)
+        new_pos = jnp.clip(new_pos,
+                           jnp.array([0, 0]),
+                           jnp.array([height - 1, width - 1]))
+    else:
+        new_pos = state.positions[type_a]
+    return state.replace(
+        positions=state.positions.at[type_a].set(new_pos),
+        score=state.score + score_delta,
+    )
+
+
 # ── Grid-based collision detection ────────────────────────────────────
 
 
 def _build_occupancy_grid(positions, alive, height, width):
     """Build a [height, width] boolean grid from sprite positions."""
     ipos = positions.astype(jnp.int32)
-    in_bounds = (
-        (ipos[:, 0] >= 0) & (ipos[:, 0] < height) &
-        (ipos[:, 1] >= 0) & (ipos[:, 1] < width)
-    )
+    in_bounds = _in_bounds(ipos, height, width)
     effective = alive & in_bounds
     grid = jnp.zeros((height, width), dtype=jnp.bool_)
     grid = grid.at[ipos[:, 0], ipos[:, 1]].max(effective)
@@ -169,10 +202,7 @@ def _collision_mask(state, type_a, type_b, height, width):
     """Which type_a sprites overlap with any type_b sprite? Returns [max_n] bool."""
     pos_a = state.positions[type_a].astype(jnp.int32)
     alive_a = state.alive[type_a]
-    in_bounds_a = (
-        (pos_a[:, 0] >= 0) & (pos_a[:, 0] < height) &
-        (pos_a[:, 1] >= 0) & (pos_a[:, 1] < width)
-    )
+    in_bounds_a = _in_bounds(pos_a, height, width)
 
     if type_a != type_b:
         grid_b = _build_occupancy_grid(
@@ -280,13 +310,7 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
             c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
             grid_coll = jnp.zeros((height, width), dtype=jnp.bool_)
             grid_coll = grid_coll.at[r_a, c_a].max(mask)
-            ipos_b = state.positions[type_b].astype(jnp.int32)
-            r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-            c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-            in_bounds_b = (
-                (ipos_b[:, 0] >= 0) & (ipos_b[:, 0] < height) &
-                (ipos_b[:, 1] >= 0) & (ipos_b[:, 1] < width)
-            )
+            _, r_b, c_b, in_bounds_b = _get_partner_coords(state, type_b, height, width)
             mask_b = grid_coll[r_b, c_b] & state.alive[type_b] & in_bounds_b
             state = state.replace(
                 alive=state.alive.at[type_b].set(state.alive[type_b] & ~mask_b))
@@ -378,13 +402,7 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
             grid_coll = jnp.zeros((height, width), dtype=jnp.bool_)
             grid_coll = grid_coll.at[r_a, c_a].max(mask)
             # Find type_b sprites at those positions
-            ipos_b = state.positions[type_b].astype(jnp.int32)
-            r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-            c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-            in_bounds_b = (
-                (ipos_b[:, 0] >= 0) & (ipos_b[:, 0] < height) &
-                (ipos_b[:, 1] >= 0) & (ipos_b[:, 1] < width)
-            )
+            _, r_b, c_b, in_bounds_b = _get_partner_coords(state, type_b, height, width)
             b_mask = grid_coll[r_b, c_b] & state.alive[type_b] & in_bounds_b
             cur = state.resources[type_b, :, r_idx]
             new_val = jnp.where(b_mask, jnp.clip(cur + r_value, 0, limit), cur)
@@ -417,15 +435,11 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         r_idx = kwargs.get('resource_idx', 0)
         limit = kwargs.get('limit', 0)
         if type_b >= 0:
-            # Build [H,W] grid of partner resource values
-            ipos_b = state.positions[type_b].astype(jnp.int32)
-            r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-            c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
+            _, r_b, c_b, _ = _get_partner_coords(state, type_b, height, width)
             res_grid = jnp.zeros((height, width), dtype=jnp.int32)
             b_res = state.resources[type_b, :, r_idx]
             res_grid = res_grid.at[r_b, c_b].max(
                 jnp.where(state.alive[type_b], b_res, 0))
-            # Look up at type_a positions
             ipos_a = state.positions[type_a].astype(jnp.int32)
             r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
             c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
@@ -442,9 +456,7 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         r_idx = kwargs.get('resource_idx', 0)
         limit = kwargs.get('limit', 0)
         if type_b >= 0:
-            ipos_b = state.positions[type_b].astype(jnp.int32)
-            r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-            c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
+            _, r_b, c_b, _ = _get_partner_coords(state, type_b, height, width)
             # Use -1 as sentinel for "no partner here"
             res_grid = jnp.full((height, width), -1, dtype=jnp.int32)
             b_res = state.resources[type_b, :, r_idx]
@@ -511,34 +523,9 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         )
 
     elif effect_type == 'bounce_forward':
-        # Push type_a in type_b's last movement direction
-        if type_b >= 0:
-            b_delta = (state.positions[type_b] - prev_positions[type_b]).astype(jnp.int32)
-            # Build [H,W,2] grid of partner deltas
-            ipos_b = state.positions[type_b].astype(jnp.int32)
-            r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-            c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-            delta_grid = jnp.zeros((height, width, 2), dtype=jnp.int32)
-            # For each alive type_b, write its delta at its position
-            alive_b_expanded = (state.alive[type_b])[:, None]  # [max_n, 1]
-            delta_grid = delta_grid.at[r_b, c_b].set(
-                jnp.where(alive_b_expanded, b_delta, 0))
-            # Look up at type_a positions
-            pos_a = state.positions[type_a]
-            ipos_a = pos_a.astype(jnp.int32)
-            r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-            c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
-            push_delta = delta_grid[r_a, c_a]
-            new_pos = jnp.where(mask[:, None], pos_a + push_delta, pos_a)
-            new_pos = jnp.clip(new_pos,
-                               jnp.array([0, 0]),
-                               jnp.array([height - 1, width - 1]))
-        else:
-            new_pos = state.positions[type_a]
-        return state.replace(
-            positions=state.positions.at[type_a].set(new_pos),
-            score=state.score + score_delta,
-        )
+        return _apply_partner_delta(
+            state, prev_positions, type_a, type_b, mask,
+            height, width, score_delta)
 
     elif effect_type == 'undo_all':
         # When ANY masked sprite triggers, revert ALL positions globally
@@ -577,31 +564,9 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         return state
 
     elif effect_type == 'pull_with_it':
-        # Move type_a in type_b's movement direction
-        if type_b >= 0:
-            b_delta = (state.positions[type_b] - prev_positions[type_b]).astype(jnp.int32)
-            ipos_b = state.positions[type_b].astype(jnp.int32)
-            r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-            c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-            delta_grid = jnp.zeros((height, width, 2), dtype=jnp.int32)
-            alive_b_expanded = (state.alive[type_b])[:, None]
-            delta_grid = delta_grid.at[r_b, c_b].set(
-                jnp.where(alive_b_expanded, b_delta, 0))
-            pos_a = state.positions[type_a]
-            ipos_a = pos_a.astype(jnp.int32)
-            r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-            c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
-            pull_delta = delta_grid[r_a, c_a]
-            new_pos = jnp.where(mask[:, None], pos_a + pull_delta, pos_a)
-            new_pos = jnp.clip(new_pos,
-                               jnp.array([0, 0]),
-                               jnp.array([height - 1, width - 1]))
-        else:
-            new_pos = state.positions[type_a]
-        return state.replace(
-            positions=state.positions.at[type_a].set(new_pos),
-            score=state.score + score_delta,
-        )
+        return _apply_partner_delta(
+            state, prev_positions, type_a, type_b, mask,
+            height, width, score_delta)
 
     elif effect_type == 'wall_stop':
         # Axis-separated collision resolution for continuous physics.
@@ -876,21 +841,17 @@ def _update_npc(state, type_idx, cfg, height, width):
     cooldown = cfg.get('cooldown', 1)
 
     if sc == SpriteClass.MISSILE:
-        from vgdl_jax.sprites import update_missile
         return update_missile(state, type_idx, cooldown)
 
     elif sc == SpriteClass.RANDOM_NPC:
-        from vgdl_jax.sprites import update_random_npc
         return update_random_npc(state, type_idx, cooldown)
 
     elif sc == SpriteClass.CHASER:
-        from vgdl_jax.sprites import update_chaser
         return update_chaser(state, type_idx,
                              cfg['target_type_idx'], cooldown, fleeing=False,
                              height=height, width=width)
 
     elif sc == SpriteClass.FLEEING:
-        from vgdl_jax.sprites import update_chaser
         return update_chaser(state, type_idx,
                              cfg['target_type_idx'], cooldown, fleeing=True,
                              height=height, width=width)
@@ -899,7 +860,6 @@ def _update_npc(state, type_idx, cfg, height, width):
         return state
 
     elif sc == SpriteClass.SPAWN_POINT:
-        from vgdl_jax.sprites import update_spawn_point
         return update_spawn_point(
             state, type_idx, cooldown,
             prob=cfg.get('prob', 1.0),
@@ -911,7 +871,6 @@ def _update_npc(state, type_idx, cfg, height, width):
         )
 
     elif sc == SpriteClass.BOMBER:
-        from vgdl_jax.sprites import update_missile, update_spawn_point
         state = update_missile(state, type_idx, cooldown)
         state = update_spawn_point(
             state, type_idx,
@@ -926,7 +885,6 @@ def _update_npc(state, type_idx, cfg, height, width):
         return state
 
     elif sc == SpriteClass.WALKER:
-        from vgdl_jax.sprites import update_missile
         return update_missile(state, type_idx, cooldown)
 
     return state

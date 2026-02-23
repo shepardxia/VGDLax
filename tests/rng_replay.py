@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from vgdl_jax.data_model import SpriteClass
+from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES
 
 # ── Direction mapping ─────────────────────────────────────────────────
 #
@@ -34,17 +34,6 @@ _RNG_NPC_CLASSES = {
     SpriteClass.FLEEING,
     SpriteClass.SPAWN_POINT,
     SpriteClass.BOMBER,
-}
-
-# Static / avatar classes skipped in NPC loop
-_STATIC_CLASSES = {
-    SpriteClass.IMMOVABLE, SpriteClass.PASSIVE,
-    SpriteClass.RESOURCE, SpriteClass.PORTAL,
-}
-_AVATAR_CLASSES = {
-    SpriteClass.MOVING_AVATAR, SpriteClass.FLAK_AVATAR,
-    SpriteClass.SHOOT_AVATAR, SpriteClass.HORIZONTAL_AVATAR,
-    SpriteClass.ORIENTED_AVATAR,
 }
 
 
@@ -95,7 +84,7 @@ class RNGRecorder:
         # Walk NPC update order (same as step.py lines 106-112)
         for type_idx, cfg in enumerate(self.sprite_configs):
             sc = cfg['sprite_class']
-            if sc in _AVATAR_CLASSES or sc in _STATIC_CLASSES:
+            if sc in AVATAR_CLASSES or sc in STATIC_CLASSES:
                 continue
 
             sprite_key = self.game_def.sprites[type_idx].key

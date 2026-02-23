@@ -2,8 +2,7 @@ import os
 import jax
 from vgdl_jax.parser import parse_vgdl
 from vgdl_jax.compiler import compile_game
-
-GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
+from conftest import GAMES_DIR
 
 
 def test_compile_chase():

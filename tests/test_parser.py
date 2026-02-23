@@ -1,8 +1,7 @@
 import os
 from vgdl_jax.parser import parse_vgdl
 from vgdl_jax.data_model import SpriteClass, EffectType
-
-GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
+from conftest import GAMES_DIR
 
 
 def test_parse_chase():

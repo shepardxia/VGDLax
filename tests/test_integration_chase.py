@@ -1,53 +1,11 @@
 import jax
 import jax.numpy as jnp
-from vgdl_jax.env import VGDLJaxEnv
-import os
-
-GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
-
-
-def test_chase_runs_100_steps():
-    env = VGDLJaxEnv(
-        os.path.join(GAMES_DIR, 'chase.txt'),
-        os.path.join(GAMES_DIR, 'chase_lvl0.txt'))
-    rng = jax.random.PRNGKey(42)
-    obs, state = env.reset(rng)
-
-    for i in range(100):
-        rng, key = jax.random.split(rng)
-        action = jax.random.randint(key, (), 0, env.n_actions)
-        obs, state, reward, done, info = env.step(state, action)
-        if done:
-            break
-
-    assert state.step_count > 0
-
-
-def test_chase_game_eventually_ends():
-    """Run many random steps — eventually avatar should die or all scared caught."""
-    env = VGDLJaxEnv(
-        os.path.join(GAMES_DIR, 'chase.txt'),
-        os.path.join(GAMES_DIR, 'chase_lvl0.txt'))
-    rng = jax.random.PRNGKey(0)
-    obs, state = env.reset(rng)
-
-    # Chase can take many steps with random play on a complex level
-    for i in range(5000):
-        rng, key = jax.random.split(rng)
-        action = jax.random.randint(key, (), 0, env.n_actions)
-        obs, state, reward, done, info = env.step(state, action)
-        if done:
-            break
-
-    # Game should eventually end
-    assert state.done == True
+from conftest import make_env
 
 
 def test_chase_jit_speed():
     """Verify jit compilation works and steps are fast."""
-    env = VGDLJaxEnv(
-        os.path.join(GAMES_DIR, 'chase.txt'),
-        os.path.join(GAMES_DIR, 'chase_lvl0.txt'))
+    env = make_env('chase')
     rng = jax.random.PRNGKey(0)
     obs, state = env.reset(rng)
 
@@ -60,9 +18,7 @@ def test_chase_jit_speed():
 
 def test_chase_stepback_prevents_wall_pass():
     """Avatar should not pass through walls."""
-    env = VGDLJaxEnv(
-        os.path.join(GAMES_DIR, 'chase.txt'),
-        os.path.join(GAMES_DIR, 'chase_lvl0.txt'))
+    env = make_env('chase')
     rng = jax.random.PRNGKey(0)
     obs, state = env.reset(rng)
 

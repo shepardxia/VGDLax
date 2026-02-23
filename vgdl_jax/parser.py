@@ -329,9 +329,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
 
     # Spawner stype (for SpawnPoint, Bomber, ShootAvatar, FlakAvatar, Chaser, Fleeing)
     spawner_stype = args.get('stype', None)
-    if isinstance(spawner_stype, str):
-        spawner_stype = spawner_stype
-    else:
+    if not isinstance(spawner_stype, str):
         spawner_stype = None
 
     spawner_prob = float(args.get('prob', 1.0))
@@ -348,9 +346,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
 
     # Sprite image path (e.g. "oryx/alien1")
     img = args.get('img', None)
-    if isinstance(img, str):
-        img = img
-    else:
+    if not isinstance(img, str):
         img = None
 
     # Shrinkfactor: default 0.0 for all types.

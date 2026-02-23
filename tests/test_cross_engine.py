@@ -41,7 +41,7 @@ from vgdl_jax.parser import parse_vgdl
 from vgdl_jax.compiler import compile_game
 from vgdl_jax.render import render_pygame
 
-GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
+from conftest import GAMES_DIR
 BLOCK_SIZE = 10
 SKIP_MSG = "requires pygame and py-vgdl"
 

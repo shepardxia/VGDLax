@@ -59,6 +59,21 @@ class TerminationType:
     TIMEOUT = 2
 
 
+# Sprite classes that never move and should be skipped in NPC update
+STATIC_CLASSES = {
+    SpriteClass.IMMOVABLE, SpriteClass.PASSIVE,
+    SpriteClass.RESOURCE, SpriteClass.PORTAL,
+}
+
+# Avatar classes handled by _update_avatar (not NPC update)
+AVATAR_CLASSES = {
+    SpriteClass.MOVING_AVATAR, SpriteClass.FLAK_AVATAR,
+    SpriteClass.SHOOT_AVATAR, SpriteClass.HORIZONTAL_AVATAR,
+    SpriteClass.ORIENTED_AVATAR,
+    SpriteClass.INERTIAL_AVATAR, SpriteClass.MARIO_AVATAR,
+}
+
+
 @dataclass
 class SpriteDef:
     key: str
