@@ -25,6 +25,19 @@ class SpriteClass:
     PORTAL = 17
     INERTIAL_AVATAR = 18
     MARIO_AVATAR = 19
+    VERTICAL_AVATAR = 20
+    CONVEYOR = 21
+    ERRATIC_MISSILE = 22
+    RANDOM_INERTIAL = 23
+    RANDOM_MISSILE = 24
+    ROTATING_AVATAR = 25
+    ROTATING_FLIPPING_AVATAR = 26
+    NOISY_ROTATING_FLIPPING_AVATAR = 27
+    SHOOT_EVERYWHERE_AVATAR = 28
+    AIMED_AVATAR = 29
+    AIMED_FLAK_AVATAR = 30
+    SPREADER = 31
+    WALK_JUMPER = 32
 
 
 class EffectType:
@@ -51,18 +64,35 @@ class EffectType:
     WALL_STOP = 19
     WALL_BOUNCE = 20
     BOUNCE_DIRECTION = 21
+    FLIP_DIRECTION = 22
+    KILL_IF_ALIVE = 23
+    KILL_IF_SLOW = 24
+    CONVEY_SPRITE = 25
+    CLONE_SPRITE = 26
+    SPAWN_IF_HAS_MORE = 27
+    WIND_GUST = 28
+    SLIP_FORWARD = 29
+    ATTRACT_GAZE = 30
+    SPEND_RESOURCE = 31
+    SPEND_AVATAR_RESOURCE = 32
+    KILL_OTHERS = 33
+    KILL_IF_AVATAR_WITHOUT_RESOURCE = 34
+    AVATAR_COLLECT_RESOURCE = 35
+    TRANSFORM_OTHERS_TO = 36
 
 
 class TerminationType:
     SPRITE_COUNTER = 0
     MULTI_SPRITE_COUNTER = 1
     TIMEOUT = 2
+    RESOURCE_COUNTER = 3
 
 
 # Sprite classes that never move and should be skipped in NPC update
 STATIC_CLASSES = {
     SpriteClass.IMMOVABLE, SpriteClass.PASSIVE,
     SpriteClass.RESOURCE, SpriteClass.PORTAL,
+    SpriteClass.CONVEYOR,
 }
 
 # Avatar classes handled by _update_avatar (not NPC update)
@@ -71,6 +101,11 @@ AVATAR_CLASSES = {
     SpriteClass.SHOOT_AVATAR, SpriteClass.HORIZONTAL_AVATAR,
     SpriteClass.ORIENTED_AVATAR,
     SpriteClass.INERTIAL_AVATAR, SpriteClass.MARIO_AVATAR,
+    SpriteClass.VERTICAL_AVATAR,
+    SpriteClass.ROTATING_AVATAR, SpriteClass.ROTATING_FLIPPING_AVATAR,
+    SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR,
+    SpriteClass.SHOOT_EVERYWHERE_AVATAR,
+    SpriteClass.AIMED_AVATAR, SpriteClass.AIMED_FLAK_AVATAR,
 }
 
 
@@ -104,6 +139,7 @@ class SpriteDef:
     strength: float = 1.0               # force multiplier (VGDLSprite default)
     jump_strength: float = 10.0         # MarioAvatar upward impulse
     airsteering: bool = False            # MarioAvatar air control
+    angle_diff: float = 0.05             # AimedAvatar rotation step (radians)
 
 
 @dataclass

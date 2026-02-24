@@ -13,8 +13,9 @@ from vgdl_jax.collision import detect_eos
 from vgdl_jax.sprites import (
     DIRECTION_DELTAS, spawn_sprite,
     update_inertial_avatar, update_mario_avatar,
-    update_missile, update_random_npc, update_chaser,
-    update_spawn_point,
+    update_missile, update_erratic_missile, update_random_npc,
+    update_random_inertial, update_spreader, update_chaser,
+    update_spawn_point, update_walk_jumper,
 )
 from vgdl_jax.terminations import check_all_terminations
 from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES
@@ -87,6 +88,10 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params):
                 gravity=avatar_config['gravity'],
                 airsteering=avatar_config['airsteering'],
                 height=height, width=width)
+        elif avatar_config.get('is_aimed', False):
+            state = _update_aimed_avatar(state, action, avatar_config, height, width)
+        elif avatar_config.get('is_rotating', False):
+            state = _update_rotating_avatar(state, action, avatar_config, height, width)
         else:
             state = _update_avatar(state, action, avatar_config, height, width)
 
@@ -775,6 +780,278 @@ def _apply_masked_effect(state, prev_positions, type_a, type_b, mask,
             )
         return state.replace(score=state.score + score_delta)
 
+    elif effect_type == 'kill_if_alive':
+        # Kill type_a if type_b is alive. In the batched model, the collision
+        # mask already requires type_b alive, so this is equivalent to kill_sprite.
+        # (A prior effect killing type_b this step won't be reflected — A4 limitation.)
+        return state.replace(
+            alive=state.alive.at[type_a].set(state.alive[type_a] & ~mask),
+            score=state.score + score_delta,
+        )
+
+    elif effect_type == 'convey_sprite':
+        # Move type_a in direction of type_b's orientation * strength
+        strength = kwargs.get('strength', 1.0)
+        if type_b >= 0:
+            # Build [H,W,2] grid of partner orientations
+            ipos_b, r_b, c_b, in_bounds_b = _get_partner_coords(
+                state, type_b, height, width)
+            ori_grid = jnp.zeros((height, width, 2), dtype=jnp.float32)
+            alive_b = state.alive[type_b] & in_bounds_b
+            ori_grid = ori_grid.at[r_b, c_b].set(
+                jnp.where(alive_b[:, None], state.orientations[type_b],
+                          jnp.zeros(2)))
+            # Look up partner orientation at type_a positions
+            pos_a = state.positions[type_a]
+            ipos_a = pos_a.astype(jnp.int32)
+            r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
+            c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
+            partner_ori = ori_grid[r_a, c_a]  # [max_n, 2]
+            new_pos = jnp.where(mask[:, None],
+                                pos_a + partner_ori * strength, pos_a)
+        else:
+            new_pos = state.positions[type_a]
+        return state.replace(
+            positions=state.positions.at[type_a].set(new_pos),
+            score=state.score + score_delta,
+        )
+
+    elif effect_type == 'clone_sprite':
+        # Spawn copies of type_a at each masked sprite's position (source stays alive)
+        n_spawns = mask.sum()
+        available = ~state.alive[type_a]
+        slot_rank = jnp.cumsum(available)
+        should_fill = available & (slot_rank <= n_spawns)
+        source_order = jnp.argsort(~mask)
+        src_idx = source_order[jnp.clip(slot_rank - 1, 0, max_n - 1)]
+        src_pos = state.positions[type_a][src_idx]
+        src_ori = state.orientations[type_a][src_idx]
+        return state.replace(
+            alive=state.alive.at[type_a].set(
+                state.alive[type_a] | should_fill),
+            positions=state.positions.at[type_a].set(
+                jnp.where(should_fill[:, None], src_pos,
+                          state.positions[type_a])),
+            orientations=state.orientations.at[type_a].set(
+                jnp.where(should_fill[:, None], src_ori,
+                          state.orientations[type_a])),
+            ages=state.ages.at[type_a].set(
+                jnp.where(should_fill, 0, state.ages[type_a])),
+            score=state.score + score_delta,
+        )
+
+    elif effect_type == 'spawn_if_has_more':
+        # Spawn stype if type_a's resource >= limit
+        r_idx = kwargs.get('resource_idx', 0)
+        limit = kwargs.get('limit', 0)
+        spawn_type = kwargs.get('spawn_type_idx', -1)
+        if spawn_type >= 0:
+            cur = state.resources[type_a, :, r_idx]
+            has_enough = mask & (cur >= limit)
+            n_spawns = has_enough.sum()
+            available = ~state.alive[spawn_type]
+            slot_rank = jnp.cumsum(available)
+            should_fill = available & (slot_rank <= n_spawns)
+            source_order = jnp.argsort(~has_enough)
+            src_idx = source_order[jnp.clip(slot_rank - 1, 0, max_n - 1)]
+            src_pos = state.positions[type_a][src_idx]
+            state = state.replace(
+                alive=state.alive.at[spawn_type].set(
+                    state.alive[spawn_type] | should_fill),
+                positions=state.positions.at[spawn_type].set(
+                    jnp.where(should_fill[:, None], src_pos,
+                              state.positions[spawn_type])),
+                ages=state.ages.at[spawn_type].set(
+                    jnp.where(should_fill, 0, state.ages[spawn_type])),
+            )
+        return state.replace(score=state.score + score_delta)
+
+    elif effect_type == 'kill_if_slow':
+        # Kill type_a if its speed < limitspeed
+        limitspeed = kwargs.get('limitspeed', 0.0)
+        is_slow = state.speeds[type_a] < limitspeed
+        should_kill = mask & is_slow
+        return state.replace(
+            alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
+            score=state.score + should_kill.sum() * jnp.int32(score_change),
+        )
+
+    elif effect_type == 'flip_direction':
+        # Randomize orientation to one of 4 cardinal directions
+        rng, key = jax.random.split(state.rng)
+        dir_indices = jax.random.randint(key, (max_n,), 0, 4)
+        random_ori = DIRECTION_DELTAS[dir_indices]
+        new_ori = jnp.where(mask[:, None], random_ori, state.orientations[type_a])
+        return state.replace(
+            orientations=state.orientations.at[type_a].set(new_ori),
+            score=state.score + score_delta,
+            rng=rng,
+        )
+
+    elif effect_type == 'wind_gust':
+        # Push type_a by random offset in partner's orientation direction
+        # Strength randomly chosen as partner.strength + {-1, 0, 1}
+        if type_b >= 0:
+            rng, key = jax.random.split(state.rng)
+            offsets = jax.random.randint(key, (max_n,), -1, 2)  # {-1, 0, 1}
+            base_strength = state.speeds[type_b]  # Use speed as proxy for strength
+            per_sprite = (base_strength[:max_n] + offsets.astype(jnp.float32))
+            # Get partner orientation at colliding positions
+            # For simplicity, use first alive partner's orientation
+            partner_ori = state.orientations[type_b, 0]
+            delta = partner_ori[None, :] * per_sprite[:, None]
+            new_pos = jnp.where(mask[:, None],
+                                state.positions[type_a] + delta,
+                                state.positions[type_a])
+            return state.replace(
+                positions=state.positions.at[type_a].set(new_pos),
+                score=state.score + score_delta,
+                rng=rng,
+            )
+        return state.replace(score=state.score + score_delta)
+
+    elif effect_type == 'slip_forward':
+        # Move type_a 1 step in its orientation direction with probability prob
+        prob = kwargs.get('prob', 0.5)
+        rng, key = jax.random.split(state.rng)
+        rolls = jax.random.uniform(key, (max_n,))
+        should_slip = mask & (rolls < prob)
+        delta = state.orientations[type_a]
+        new_pos = jnp.where(should_slip[:, None],
+                            state.positions[type_a] + delta,
+                            state.positions[type_a])
+        return state.replace(
+            positions=state.positions.at[type_a].set(new_pos),
+            score=state.score + score_delta,
+            rng=rng,
+        )
+
+    elif effect_type == 'attract_gaze':
+        # Type_a adopts type_b's orientation with probability prob
+        prob = kwargs.get('prob', 0.5)
+        if type_b >= 0:
+            rng, key = jax.random.split(state.rng)
+            rolls = jax.random.uniform(key, (max_n,))
+            should_attract = mask & (rolls < prob)
+            partner_ori = state.orientations[type_b, 0]
+            new_ori = jnp.where(should_attract[:, None],
+                                jnp.broadcast_to(partner_ori, state.orientations[type_a].shape),
+                                state.orientations[type_a])
+            return state.replace(
+                orientations=state.orientations.at[type_a].set(new_ori),
+                score=state.score + score_delta,
+                rng=rng,
+            )
+        return state.replace(score=state.score + score_delta)
+
+    elif effect_type == 'spend_resource':
+        # Deduct resource from type_a (avatar) on collision
+        r_idx = kwargs.get('resource_idx', 0)
+        amount = kwargs.get('amount', 1)
+        cur = state.resources[type_a, :, r_idx]
+        spend = jnp.where(mask, jnp.minimum(cur, amount), 0)
+        new_res = state.resources.at[type_a, :, r_idx].add(-spend)
+        return state.replace(
+            resources=new_res,
+            score=state.score + score_delta,
+        )
+
+    elif effect_type == 'spend_avatar_resource':
+        # Deduct resource from avatar (regardless of type_a/type_b)
+        ati = kwargs.get('avatar_type_idx', 0)
+        r_idx = kwargs.get('resource_idx', 0)
+        amount = kwargs.get('amount', 1)
+        n_affected = mask.sum()
+        total_spend = n_affected * amount
+        cur = state.resources[ati, 0, r_idx]
+        spend = jnp.minimum(cur, total_spend)
+        new_res = state.resources.at[ati, 0, r_idx].add(-spend)
+        return state.replace(
+            resources=new_res,
+            score=state.score + score_delta,
+        )
+
+    elif effect_type == 'kill_others':
+        # Kill all alive sprites of target type
+        kill_type = kwargs.get('kill_type_idx', -1)
+        if kill_type >= 0:
+            # Only kill if at least one collision triggered
+            any_collision = mask.any()
+            new_alive = jnp.where(any_collision,
+                                   jnp.zeros_like(state.alive[kill_type]),
+                                   state.alive[kill_type])
+            return state.replace(
+                alive=state.alive.at[kill_type].set(new_alive),
+                score=state.score + score_delta,
+            )
+        return state.replace(score=state.score + score_delta)
+
+    elif effect_type == 'kill_if_avatar_without_resource':
+        # Kill type_a if avatar lacks the specified resource
+        ati = kwargs.get('avatar_type_idx', 0)
+        r_idx = kwargs.get('resource_idx', 0)
+        avatar_has = state.resources[ati, 0, r_idx] > 0
+        should_kill = mask & ~avatar_has
+        return state.replace(
+            alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
+            score=state.score + should_kill.sum() * jnp.int32(score_change),
+        )
+
+    elif effect_type == 'avatar_collect_resource':
+        # Avatar collects resource from type_a (Resource sprite)
+        ati = kwargs.get('avatar_type_idx', 0)
+        r_idx = kwargs.get('resource_idx', 0)
+        r_val = kwargs.get('resource_value', 1)
+        limit = kwargs.get('limit', 100)
+        n_collected = mask.sum()
+        cur = state.resources[ati, 0, r_idx]
+        new_val = jnp.minimum(cur + n_collected * r_val, limit)
+        new_res = state.resources.at[ati, 0, r_idx].set(new_val)
+        return state.replace(
+            resources=new_res,
+            score=state.score + score_delta,
+        )
+
+    elif effect_type == 'transform_others_to':
+        # Transform all sprites of target type into new type
+        target_type = kwargs.get('target_type_idx', -1)
+        new_type = kwargs.get('new_type_idx', -1)
+        if target_type >= 0 and new_type >= 0:
+            any_collision = mask.any()
+            # Kill all target_type sprites and spawn same count of new_type
+            target_alive = state.alive[target_type] & any_collision
+            n_to_transform = target_alive.sum()
+
+            # Kill target_type
+            new_target_alive = jnp.where(any_collision,
+                                          jnp.zeros_like(state.alive[target_type]),
+                                          state.alive[target_type])
+
+            # Spawn new_type at target positions using prefix-sum
+            available = ~state.alive[new_type]
+            slot_rank = jnp.cumsum(available)
+            should_fill = available & (slot_rank <= n_to_transform)
+
+            source_order = jnp.argsort(~target_alive)
+            src_idx = source_order[jnp.clip(slot_rank - 1, 0, max_n - 1)]
+            src_pos = state.positions[target_type][src_idx]
+            src_ori = state.orientations[target_type][src_idx]
+
+            new_new_alive = state.alive[new_type] | should_fill
+            new_new_pos = jnp.where(should_fill[:, None], src_pos,
+                                     state.positions[new_type])
+            new_new_ori = jnp.where(should_fill[:, None], src_ori,
+                                     state.orientations[new_type])
+
+            state = state.replace(
+                alive=state.alive.at[target_type].set(new_target_alive).at[new_type].set(new_new_alive),
+                positions=state.positions.at[new_type].set(new_new_pos),
+                orientations=state.orientations.at[new_type].set(new_new_ori),
+                ages=state.ages.at[new_type].set(
+                    jnp.where(should_fill, 0, state.ages[new_type])),
+            )
+        return state.replace(score=state.score + score_delta)
+
     else:
         # null / unknown effect
         return state.replace(score=state.score + score_delta)
@@ -802,8 +1079,6 @@ def _update_avatar(state, action, cfg, height, width):
     can_move = state.cooldown_timers[avatar_type, 0] >= cooldown
     should_move = is_move & can_move
     new_pos = state.positions[avatar_type, 0] + delta * should_move
-    new_pos = jnp.clip(new_pos, jnp.array([0.0, 0.0]),
-                        jnp.array([height - 1, width - 1], dtype=jnp.float32))
 
     state = state.replace(
         positions=state.positions.at[avatar_type, 0].set(new_pos),
@@ -827,11 +1102,177 @@ def _update_avatar(state, action, cfg, height, width):
         proj_type = cfg['projectile_type_idx']
         proj_speed = cfg['projectile_speed']
 
-        if cfg.get('projectile_orientation_from_avatar', False):
-            proj_ori = state.orientations[avatar_type, 0]
+        if cfg.get('shoot_everywhere', False):
+            # ShootEverywhereAvatar: fire in all 4 cardinal directions
+            def _shoot_everywhere(s):
+                for i in range(4):
+                    s = spawn_sprite(s, avatar_type, 0, proj_type,
+                                     DIRECTION_DELTAS[i], proj_speed)
+                return s
+            state = jax.lax.cond(
+                is_shoot, _shoot_everywhere, lambda s: s, state)
         else:
-            proj_ori = jnp.array(cfg['projectile_default_orientation'],
-                                  dtype=jnp.float32)
+            if cfg.get('projectile_orientation_from_avatar', False):
+                proj_ori = state.orientations[avatar_type, 0]
+            else:
+                proj_ori = jnp.array(cfg['projectile_default_orientation'],
+                                      dtype=jnp.float32)
+
+            state = jax.lax.cond(
+                is_shoot,
+                lambda s: spawn_sprite(s, avatar_type, 0, proj_type,
+                                        proj_ori, proj_speed),
+                lambda s: s,
+                state,
+            )
+
+    return state
+
+
+def _update_aimed_avatar(state, action, cfg, height, width):
+    """Update AimedAvatar / AimedFlakAvatar: continuous-angle aiming + optional horizontal movement.
+
+    AimedAvatar: AIM_UP=0, AIM_DOWN=1, SHOOT=n_move, NOOP=n_move+1
+    AimedFlakAvatar: LEFT=0, RIGHT=1, AIM_UP=2, AIM_DOWN=3, SHOOT=4, NOOP=5
+    """
+    avatar_type = cfg['avatar_type_idx']
+    angle_diff = cfg.get('angle_diff', 0.05)
+    can_move = cfg.get('can_move_aimed', False)
+    n_move = cfg['n_move_actions']
+
+    ori = state.orientations[avatar_type, 0]
+    pos = state.positions[avatar_type, 0]
+
+    if can_move:
+        # AimedFlakAvatar: actions 0,1 = LEFT,RIGHT; 2,3 = AIM_UP,AIM_DOWN
+        is_left = (action == 0)
+        is_right = (action == 1)
+        is_aim_up = (action == 2)
+        is_aim_down = (action == 3)
+        h_delta = jnp.where(is_left, -1.0, jnp.where(is_right, 1.0, 0.0))
+        new_pos = pos.at[1].add(h_delta)
+    else:
+        # AimedAvatar: actions 0,1 = AIM_UP,AIM_DOWN
+        is_aim_up = (action == 0)
+        is_aim_down = (action == 1)
+        new_pos = pos
+
+    # Apply 2D rotation to orientation
+    # AIM_UP: rotate by -angle_diff (CCW), AIM_DOWN: rotate by +angle_diff (CW)
+    # Rotation matrix: [[cos, -sin], [sin, cos]]
+    # Our orientation is (row, col) = (-sin(theta), cos(theta)) for rightward = (0, 1)
+    theta = jnp.where(is_aim_up, -angle_diff,
+                      jnp.where(is_aim_down, angle_diff, 0.0))
+    cos_t = jnp.cos(theta)
+    sin_t = jnp.sin(theta)
+    new_ori_r = cos_t * ori[0] - sin_t * ori[1]
+    new_ori_c = sin_t * ori[0] + cos_t * ori[1]
+    new_ori = jnp.array([new_ori_r, new_ori_c])
+
+    state = state.replace(
+        positions=state.positions.at[avatar_type, 0].set(new_pos),
+        orientations=state.orientations.at[avatar_type, 0].set(new_ori),
+    )
+
+    # Shoot
+    if cfg['can_shoot']:
+        is_shoot = (action == cfg['shoot_action_idx'])
+        proj_type = cfg['projectile_type_idx']
+        proj_speed = cfg['projectile_speed']
+        proj_ori = state.orientations[avatar_type, 0]
+
+        state = jax.lax.cond(
+            is_shoot,
+            lambda s: spawn_sprite(s, avatar_type, 0, proj_type,
+                                    proj_ori, proj_speed),
+            lambda s: s,
+            state,
+        )
+
+    return state
+
+
+def _update_rotating_avatar(state, action, cfg, height, width):
+    """Update rotating avatar: ego-centric forward/backward + rotation.
+
+    Actions:
+        0: thrust forward (move 1 step in current orientation)
+        1: thrust backward (RotatingAvatar) or flip 180 (Flipping variants)
+        2: rotate CCW
+        3: rotate CW
+        4+ or NOOP: no-op
+    """
+    avatar_type = cfg['avatar_type_idx']
+    is_flipping = cfg.get('is_flipping', False)
+    noise_level = cfg.get('noise_level', 0.0)
+
+    # Optionally apply noise
+    if noise_level > 0:
+        rng, key = jax.random.split(state.rng)
+        # With probability noise_level, replace action with random
+        noisy = jax.random.uniform(key) < noise_level
+        rng, key2 = jax.random.split(rng)
+        rand_action = jax.random.randint(key2, (), 0, 5)
+        action = jnp.where(noisy, rand_action, action)
+        state = state.replace(rng=rng)
+
+    ori = state.orientations[avatar_type, 0]
+
+    # Find current orientation index in DIRECTION_DELTAS
+    # UP=0, DOWN=1, LEFT=2, RIGHT=3
+    diffs = jnp.sum(jnp.abs(DIRECTION_DELTAS - ori), axis=-1)
+    ori_idx = jnp.argmin(diffs)
+
+    # Action 0: forward — move in current orientation
+    is_forward = (action == 0)
+    fwd_pos = state.positions[avatar_type, 0] + ori * is_forward
+
+    # Action 1: backward (non-flipping) or flip (flipping)
+    is_action1 = (action == 1)
+    if is_flipping:
+        # Flip: rotate 180 degrees, no movement
+        # BASEDIRS cycle: UP(0), DOWN(1), LEFT(2), RIGHT(3)
+        # 180 flip: UP↔DOWN, LEFT↔RIGHT → index XOR with specific mapping
+        # Actually use: (ori_idx + 2) wouldn't work with our BASEDIRS order
+        # UP=0→DOWN=1, DOWN=1→UP=0, LEFT=2→RIGHT=3, RIGHT=3→LEFT=2
+        flipped_idx = jnp.array([1, 0, 3, 2])[ori_idx]
+        new_ori_flip = DIRECTION_DELTAS[flipped_idx]
+        new_ori = jnp.where(is_action1, new_ori_flip, ori)
+        new_pos = jnp.where(is_forward, fwd_pos, state.positions[avatar_type, 0])
+    else:
+        # Backward: move opposite to current orientation
+        bwd_pos = state.positions[avatar_type, 0] - ori * is_action1
+        new_pos = jnp.where(is_forward, fwd_pos,
+                           jnp.where(is_action1, bwd_pos,
+                                    state.positions[avatar_type, 0]))
+        new_ori = ori
+
+    # Action 2: CCW rotation
+    # In our BASEDIRS: UP=0,DOWN=1,LEFT=2,RIGHT=3
+    # CCW: UP→LEFT→DOWN→RIGHT→UP
+    ccw_map = jnp.array([2, 3, 1, 0])  # UP→LEFT, DOWN→RIGHT, LEFT→DOWN, RIGHT→UP
+    is_ccw = (action == 2)
+    ccw_idx = ccw_map[ori_idx]
+    new_ori = jnp.where(is_ccw, DIRECTION_DELTAS[ccw_idx], new_ori)
+
+    # Action 3: CW rotation
+    # CW: UP→RIGHT→DOWN→LEFT→UP
+    cw_map = jnp.array([3, 2, 0, 1])  # UP→RIGHT, DOWN→LEFT, LEFT→UP, RIGHT→DOWN
+    is_cw = (action == 3)
+    cw_idx = cw_map[ori_idx]
+    new_ori = jnp.where(is_cw, DIRECTION_DELTAS[cw_idx], new_ori)
+
+    state = state.replace(
+        positions=state.positions.at[avatar_type, 0].set(new_pos),
+        orientations=state.orientations.at[avatar_type, 0].set(new_ori),
+    )
+
+    # Shoot (if configured)
+    if cfg['can_shoot']:
+        is_shoot = (action == cfg['shoot_action_idx'])
+        proj_type = cfg['projectile_type_idx']
+        proj_speed = cfg['projectile_speed']
+        proj_ori = state.orientations[avatar_type, 0]
 
         state = jax.lax.cond(
             is_shoot,
@@ -851,6 +1292,10 @@ def _update_npc(state, type_idx, cfg, height, width):
 
     if sc == SpriteClass.MISSILE:
         return update_missile(state, type_idx, cooldown)
+
+    elif sc == SpriteClass.ERRATIC_MISSILE:
+        return update_erratic_missile(state, type_idx, cooldown,
+                                       prob=cfg.get('prob', 0.1))
 
     elif sc == SpriteClass.RANDOM_NPC:
         return update_random_npc(state, type_idx, cooldown)
@@ -895,5 +1340,25 @@ def _update_npc(state, type_idx, cfg, height, width):
 
     elif sc == SpriteClass.WALKER:
         return update_missile(state, type_idx, cooldown)
+
+    elif sc == SpriteClass.SPREADER:
+        return update_spreader(state, type_idx,
+                                spreadprob=cfg.get('spreadprob', 1.0))
+
+    elif sc == SpriteClass.RANDOM_INERTIAL:
+        return update_random_inertial(state, type_idx,
+                                       mass=cfg.get('mass', 1.0),
+                                       strength=cfg.get('strength', 1.0))
+
+    elif sc == SpriteClass.RANDOM_MISSILE:
+        # After initialization (randomized orientation), behaves as a regular missile
+        return update_missile(state, type_idx, cooldown)
+
+    elif sc == SpriteClass.WALK_JUMPER:
+        return update_walk_jumper(state, type_idx,
+                                   prob=cfg.get('prob', 0.1),
+                                   strength=cfg.get('strength', 10.0 / 24.0),
+                                   gravity=cfg.get('gravity', 1.0 / 24.0),
+                                   mass=cfg.get('mass', 1.0))
 
     return state

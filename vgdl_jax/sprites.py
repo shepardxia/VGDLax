@@ -18,6 +18,31 @@ def update_missile(state: GameState, type_idx, cooldown):
     )
 
 
+def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
+    """Missile that randomly changes direction with probability `prob` each tick."""
+    rng, key_move, key_dir = jax.random.split(state.rng, 3)
+    max_n = state.alive.shape[1]
+
+    # Move along current orientation (same as missile)
+    can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
+    delta = state.orientations[type_idx]
+    new_pos = state.positions[type_idx] + delta * can_move[:, None]
+    new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
+
+    # Randomly change direction with probability `prob`
+    should_change = (jax.random.uniform(key_move, (max_n,)) < prob) & state.alive[type_idx]
+    dir_indices = jax.random.randint(key_dir, (max_n,), 0, 4)
+    random_ori = DIRECTION_DELTAS[dir_indices]
+    new_ori = jnp.where(should_change[:, None], random_ori, state.orientations[type_idx])
+
+    return state.replace(
+        positions=state.positions.at[type_idx].set(new_pos),
+        cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
+        orientations=state.orientations.at[type_idx].set(new_ori),
+        rng=rng,
+    )
+
+
 def update_random_npc(state: GameState, type_idx, cooldown):
     """Pick a random direction each move."""
     rng, key = jax.random.split(state.rng)
@@ -138,8 +163,11 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     max_n = state.alive.shape[1]
 
     # Vectorized spawn decision
+    # Use exact match (==) instead of (>=) to match py-vgdl's
+    # `game.time % cooldown == 0` semantics: spawners only get one
+    # chance per cooldown cycle, not retries every tick after eligible.
     is_alive = state.alive[type_idx]
-    timer_ready = state.cooldown_timers[type_idx] >= cooldown
+    timer_ready = state.cooldown_timers[type_idx] == cooldown
     under_total = (total <= 0) | (state.spawn_counts[type_idx] < total)
     rand_ok = jax.random.uniform(key, (max_n,)) < prob
     should_spawn = is_alive & timer_ready & under_total & rand_ok
@@ -184,8 +212,10 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     state = state.replace(
         spawn_counts=state.spawn_counts.at[type_idx].set(new_counts))
 
-    # Reset cooldown timers for spawners that actually fired
-    new_timers = jnp.where(actually_spawned, 0, state.cooldown_timers[type_idx])
+    # Reset cooldown timers for all spawners that attempted (timer_ready),
+    # not just those that succeeded. Matches py-vgdl's once-per-cycle semantics.
+    attempted = is_alive & timer_ready & under_total
+    new_timers = jnp.where(attempted, 0, state.cooldown_timers[type_idx])
     state = state.replace(
         cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers))
 
@@ -196,6 +226,143 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
             state.alive[type_idx] & ~(total_reached & actually_spawned)))
 
     return state
+
+
+def update_spreader(state: GameState, type_idx, spreadprob):
+    """Spreader: at age==2, replicate to 4 adjacent cells with probability `spreadprob` each."""
+    rng, key = jax.random.split(state.rng)
+    max_n = state.alive.shape[1]
+
+    is_alive = state.alive[type_idx]
+    ages = state.ages[type_idx]
+    should_spread = is_alive & (ages == 2)
+
+    # For each spreading sprite, try 4 directions
+    # Random gate per sprite per direction
+    rng, key_rand = jax.random.split(rng)
+    rand_vals = jax.random.uniform(key_rand, (max_n, 4))
+    spread_gates = rand_vals < spreadprob  # [max_n, 4]
+
+    # Compute neighbor positions for all spreaders
+    pos = state.positions[type_idx]  # [max_n, 2]
+    # DIRECTION_DELTAS: UP, DOWN, LEFT, RIGHT
+    neighbor_pos = pos[:, None, :] + DIRECTION_DELTAS[None, :, :]  # [max_n, 4, 2]
+
+    # Create flat mask of which (sprite, direction) pairs should spawn
+    spawn_mask = should_spread[:, None] & spread_gates  # [max_n, 4]
+    flat_mask = spawn_mask.reshape(-1)  # [max_n * 4]
+    flat_pos = neighbor_pos.reshape(-1, 2)  # [max_n * 4, 2]
+
+    # Prefix-sum slot allocation
+    n_spawns = flat_mask.sum()
+    available = ~state.alive[type_idx]
+    slot_rank = jnp.cumsum(available)
+    should_fill = available & (slot_rank <= n_spawns)
+
+    # Map each fill-slot to source spawn
+    source_order = jnp.argsort(~flat_mask)
+    src_idx = source_order[jnp.clip(slot_rank - 1, 0, max_n * 4 - 1)]
+    src_pos = flat_pos[src_idx]
+
+    state = state.replace(
+        alive=state.alive.at[type_idx].set(
+            state.alive[type_idx] | should_fill),
+        positions=state.positions.at[type_idx].set(
+            jnp.where(should_fill[:, None], src_pos,
+                      state.positions[type_idx])),
+        ages=state.ages.at[type_idx].set(
+            jnp.where(should_fill, 0, state.ages[type_idx])),
+        rng=rng,
+    )
+    return state
+
+
+def update_random_inertial(state: GameState, type_idx, mass, strength):
+    """RandomInertial: ContinuousPhysics NPC, random force direction each tick.
+
+    velocity += (random_direction * strength) / mass
+    position += velocity
+    orientation = velocity direction
+    """
+    rng, key = jax.random.split(state.rng)
+    max_n = state.alive.shape[1]
+
+    dir_indices = jax.random.randint(key, (max_n,), 0, 4)
+    force = DIRECTION_DELTAS[dir_indices] * strength  # [max_n, 2]
+
+    vel = state.velocities[type_idx]
+    new_vel = vel + force / mass
+    is_alive = state.alive[type_idx]
+    # Only update alive sprites
+    new_vel = jnp.where(is_alive[:, None], new_vel, vel)
+
+    new_pos = state.positions[type_idx] + new_vel * is_alive[:, None]
+
+    # Orientation from velocity
+    speed = jnp.sqrt(jnp.sum(new_vel ** 2, axis=-1, keepdims=True))
+    new_ori = jnp.where(
+        (speed > 1e-6) & is_alive[:, None],
+        new_vel / speed,
+        state.orientations[type_idx])
+
+    return state.replace(
+        positions=state.positions.at[type_idx].set(new_pos),
+        velocities=state.velocities.at[type_idx].set(new_vel),
+        orientations=state.orientations.at[type_idx].set(new_ori),
+        rng=rng,
+    )
+
+
+def update_walk_jumper(state: GameState, type_idx, prob, strength, gravity, mass):
+    """WalkJumper NPC: horizontal walker with random upward jumps under gravity.
+
+    Moves horizontally in orientation direction each tick.
+    With probability (1-prob), applies upward velocity impulse when grounded.
+    Gravity pulls down every tick.
+    """
+    alive = state.alive[type_idx]  # (max_n,)
+    n = alive.shape[0]
+    alive_f = alive.astype(jnp.float32)
+
+    vel = state.velocities[type_idx]  # (max_n, 2)
+    pf = state.passive_forces[type_idx]  # (max_n, 2)
+
+    # Grounded: passive_forces row == 0 means wallStop zeroed it last frame
+    grounded = (pf[:, 0] == 0.0)
+
+    # Random jump: py-vgdl uses `prob < random()` → jump probability = 1-prob
+    rng, key = jax.random.split(state.rng)
+    rand_vals = jax.random.uniform(key, (n,))
+    wants_jump = (rand_vals > prob) & grounded & alive
+
+    # Horizontal direction from orientation col component
+    h_dir = state.orientations[type_idx, :, 1]
+
+    # Active forces
+    active_row = jnp.where(wants_jump, -strength, 0.0)
+    active_col = h_dir * strength * alive_f
+
+    # Friction: horizontal friction when grounded (decelerates to allow jump direction to dominate)
+    friction_col = jnp.where(grounded, -vel[:, 1] / mass, 0.0)
+
+    # Velocity update
+    new_vel_row = vel[:, 0] + active_row / mass + gravity
+    new_vel_col = vel[:, 1] + (active_col + friction_col) / mass
+    new_vel = jnp.stack([new_vel_row, new_vel_col], axis=-1)
+
+    # Position update (only alive sprites move)
+    new_pos = state.positions[type_idx] + new_vel * alive_f[:, None]
+
+    # Reset passive forces to gravity (wallStop will zero on landing)
+    new_pf_row = jnp.where(alive, gravity * mass, pf[:, 0])
+    new_pf = jnp.stack([new_pf_row, pf[:, 1]], axis=-1)
+
+    return state.replace(
+        positions=state.positions.at[type_idx].set(new_pos),
+        velocities=state.velocities.at[type_idx].set(new_vel),
+        passive_forces=state.passive_forces.at[type_idx].set(new_pf),
+        rng=rng,
+    )
 
 
 # ── Continuous physics avatar updates ─────────────────────────────────

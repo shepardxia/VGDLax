@@ -14,7 +14,7 @@ from vgdl_jax.data_model import (
 )
 from vgdl_jax.state import GameState, create_initial_state
 from vgdl_jax.step import build_step_fn
-from vgdl_jax.terminations import check_sprite_counter, check_multi_sprite_counter, check_timeout
+from vgdl_jax.terminations import check_sprite_counter, check_multi_sprite_counter, check_timeout, check_resource_counter
 
 
 @dataclass
@@ -34,6 +34,13 @@ AVATAR_INFO = {
     SpriteClass.SHOOT_AVATAR: (4, True),
     SpriteClass.INERTIAL_AVATAR: (4, False),
     SpriteClass.MARIO_AVATAR: (5, False),  # LEFT, RIGHT, JUMP, J+L, J+R
+    SpriteClass.VERTICAL_AVATAR: (2, False),
+    SpriteClass.ROTATING_AVATAR: (4, False),
+    SpriteClass.ROTATING_FLIPPING_AVATAR: (4, False),
+    SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR: (4, False),
+    SpriteClass.SHOOT_EVERYWHERE_AVATAR: (4, True),
+    SpriteClass.AIMED_AVATAR: (2, True),      # AIM_UP, AIM_DOWN + shoot
+    SpriteClass.AIMED_FLAK_AVATAR: (4, True),  # LEFT, RIGHT, AIM_UP, AIM_DOWN + shoot
 }
 
 # Avatars whose action indices start at LEFT/RIGHT instead of UP/DOWN
@@ -126,6 +133,21 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         )
         slot_counts[type_idx] += 1
 
+    # Randomize orientations for RandomMissile sprites
+    rng = jax.random.PRNGKey(0)
+    direction_deltas = jnp.array([[-1, 0], [1, 0], [0, -1], [0, 1]],
+                                  dtype=jnp.float32)
+    for sd in game_def.sprites:
+        if sd.sprite_class == SpriteClass.RANDOM_MISSILE:
+            rng, key = jax.random.split(rng)
+            n_placed = slot_counts.get(sd.type_idx, 0)
+            if n_placed > 0:
+                dir_indices = jax.random.randint(key, (n_placed,), 0, 4)
+                random_oris = direction_deltas[dir_indices]
+                state = state.replace(
+                    orientations=state.orientations.at[
+                        sd.type_idx, :n_placed].set(random_oris))
+
     n_move, can_shoot = AVATAR_INFO[avatar_sd.sprite_class]
 
     # Direction offset: horizontal avatars map actions to LEFT/RIGHT (index 2,3)
@@ -172,6 +194,19 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         jump_strength=avatar_sd.jump_strength / PHYSICS_SCALE,
         airsteering=avatar_sd.airsteering,
         gravity=1.0 / PHYSICS_SCALE,  # py-vgdl GravityPhysics.gravity = 1 (pixel unit)
+        # Rotating avatar parameters
+        is_rotating=avatar_sd.sprite_class in (
+            SpriteClass.ROTATING_AVATAR,
+            SpriteClass.ROTATING_FLIPPING_AVATAR,
+            SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR),
+        is_flipping=avatar_sd.sprite_class in (
+            SpriteClass.ROTATING_FLIPPING_AVATAR,
+            SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR),
+        noise_level=0.4 if avatar_sd.sprite_class == SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR else 0.0,
+        shoot_everywhere=(avatar_sd.sprite_class == SpriteClass.SHOOT_EVERYWHERE_AVATAR),
+        is_aimed=avatar_sd.sprite_class in (SpriteClass.AIMED_AVATAR, SpriteClass.AIMED_FLAK_AVATAR),
+        can_move_aimed=avatar_sd.sprite_class == SpriteClass.AIMED_FLAK_AVATAR,
+        angle_diff=avatar_sd.angle_diff,
     )
 
     # ── 3. Build sprite configs ────────────────────────────────────────
@@ -194,6 +229,22 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             target_key = sd.spawner_stype
             target_indices = game_def.resolve_stype(target_key) if target_key else []
             cfg['target_type_idx'] = target_indices[0] if target_indices else 0
+
+        elif sd.sprite_class == SpriteClass.SPREADER:
+            cfg['spreadprob'] = sd.spawner_prob  # prob param doubles as spreadprob
+
+        elif sd.sprite_class == SpriteClass.ERRATIC_MISSILE:
+            cfg['prob'] = sd.spawner_prob  # probability of direction change per tick
+
+        elif sd.sprite_class == SpriteClass.RANDOM_INERTIAL:
+            cfg['mass'] = sd.mass
+            cfg['strength'] = sd.strength / PHYSICS_SCALE
+
+        elif sd.sprite_class == SpriteClass.WALK_JUMPER:
+            cfg['mass'] = sd.mass
+            cfg['strength'] = sd.strength / PHYSICS_SCALE
+            cfg['prob'] = sd.spawner_prob  # jump probability threshold
+            cfg['gravity'] = 1.0 / PHYSICS_SCALE
 
         elif sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
             target_key = sd.spawner_stype
@@ -230,7 +281,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                     score_change=ed.score_change,
                     kwargs=_compile_effect_kwargs(
                         ed, game_def, resource_name_to_idx, resource_limits,
-                        concrete_actor_idx=ta_idx),
+                        concrete_actor_idx=ta_idx,
+                        avatar_type_idx=avatar_sd.type_idx),
                 ))
         else:
             actee_indices = game_def.resolve_stype(ed.actee_stype)
@@ -246,7 +298,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                                   tb_idx in continuous_types),
                         kwargs=_compile_effect_kwargs(
                             ed, game_def, resource_name_to_idx, resource_limits,
-                            concrete_actor_idx=ta_idx, concrete_actee_idx=tb_idx),
+                            concrete_actor_idx=ta_idx, concrete_actee_idx=tb_idx,
+                            avatar_type_idx=avatar_sd.type_idx),
                     ))
 
     # ── 5. Build terminations ──────────────────────────────────────────
@@ -268,6 +321,15 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             win = td.win
             check_fn = lambda s, _idxs=indices_list, _lim=limit, _win=win: \
                 check_multi_sprite_counter(s, _idxs, _lim, _win)
+            compiled_terminations.append((check_fn, td.score_change))
+
+        elif td.term_type == TerminationType.RESOURCE_COUNTER:
+            res_name = td.kwargs.get('resource', '')
+            r_idx = resource_name_to_idx.get(res_name, 0)
+            limit = td.kwargs.get('limit', 0)
+            win = td.win
+            check_fn = lambda s, _ati=avatar_sd.type_idx, _ri=r_idx, _lim=limit, _win=win: \
+                check_resource_counter(s, _ati, _ri, _lim, _win)
             compiled_terminations.append((check_fn, td.score_change))
 
         elif td.term_type == TerminationType.TIMEOUT:
@@ -317,12 +379,28 @@ def _effect_type_str(effect_type_int):
         EffectType.WALL_STOP: 'wall_stop',
         EffectType.WALL_BOUNCE: 'wall_bounce',
         EffectType.BOUNCE_DIRECTION: 'bounce_direction',
+        EffectType.FLIP_DIRECTION: 'flip_direction',
+        EffectType.KILL_IF_ALIVE: 'kill_if_alive',
+        EffectType.KILL_IF_SLOW: 'kill_if_slow',
+        EffectType.CONVEY_SPRITE: 'convey_sprite',
+        EffectType.CLONE_SPRITE: 'clone_sprite',
+        EffectType.SPAWN_IF_HAS_MORE: 'spawn_if_has_more',
+        EffectType.WIND_GUST: 'wind_gust',
+        EffectType.SLIP_FORWARD: 'slip_forward',
+        EffectType.ATTRACT_GAZE: 'attract_gaze',
+        EffectType.SPEND_RESOURCE: 'spend_resource',
+        EffectType.SPEND_AVATAR_RESOURCE: 'spend_avatar_resource',
+        EffectType.KILL_OTHERS: 'kill_others',
+        EffectType.KILL_IF_AVATAR_WITHOUT_RESOURCE: 'kill_if_avatar_without_resource',
+        EffectType.AVATAR_COLLECT_RESOURCE: 'avatar_collect_resource',
+        EffectType.TRANSFORM_OTHERS_TO: 'transform_others_to',
     }
     return mapping.get(effect_type_int, 'null')
 
 
 def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
-                           concrete_actor_idx=None, concrete_actee_idx=None):
+                           concrete_actor_idx=None, concrete_actee_idx=None,
+                           avatar_type_idx=None):
     """Compile effect kwargs, resolving stype references to type indices."""
     kwargs = {}
     if ed.effect_type == EffectType.TRANSFORM_TO:
@@ -360,6 +438,78 @@ def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
         res_name = ed.kwargs.get('resource', '')
         kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
         kwargs['limit'] = ed.kwargs.get('limit', 0)
+
+    elif ed.effect_type == EffectType.KILL_IF_SLOW:
+        kwargs['limitspeed'] = ed.kwargs.get('limitspeed', 0.0)
+
+    elif ed.effect_type == EffectType.CONVEY_SPRITE:
+        # Strength from the partner (actee/type_b) SpriteDef
+        if concrete_actee_idx is not None:
+            partner_sd = game_def.sprites[concrete_actee_idx]
+            kwargs['strength'] = partner_sd.strength
+        else:
+            kwargs['strength'] = 1.0
+
+    elif ed.effect_type == EffectType.SPAWN_IF_HAS_MORE:
+        res_name = ed.kwargs.get('resource', '')
+        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
+        kwargs['limit'] = ed.kwargs.get('limit', 0)
+        stype = ed.kwargs.get('stype', '')
+        indices = game_def.resolve_stype(stype)
+        if indices:
+            kwargs['spawn_type_idx'] = indices[0]
+
+    elif ed.effect_type == EffectType.SLIP_FORWARD:
+        kwargs['prob'] = float(ed.kwargs.get('prob', 0.5))
+
+    elif ed.effect_type == EffectType.ATTRACT_GAZE:
+        kwargs['prob'] = float(ed.kwargs.get('prob', 0.5))
+
+    elif ed.effect_type == EffectType.SPEND_RESOURCE:
+        res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
+        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
+        kwargs['amount'] = int(ed.kwargs.get('amount', 1))
+
+    elif ed.effect_type == EffectType.SPEND_AVATAR_RESOURCE:
+        res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
+        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
+        kwargs['amount'] = int(ed.kwargs.get('amount', 1))
+        kwargs['avatar_type_idx'] = avatar_type_idx
+
+    elif ed.effect_type == EffectType.KILL_OTHERS:
+        stype = ed.kwargs.get('stype', ed.kwargs.get('target', ''))
+        indices = game_def.resolve_stype(stype)
+        if indices:
+            kwargs['kill_type_idx'] = indices[0]
+
+    elif ed.effect_type == EffectType.KILL_IF_AVATAR_WITHOUT_RESOURCE:
+        res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
+        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
+        kwargs['avatar_type_idx'] = avatar_type_idx
+
+    elif ed.effect_type == EffectType.AVATAR_COLLECT_RESOURCE:
+        # Actor is a Resource sprite — look up its resource info (same as collect_resource)
+        if concrete_actor_idx is not None:
+            res_sd = game_def.sprites[concrete_actor_idx]
+        else:
+            actor_indices = game_def.resolve_stype(ed.actor_stype)
+            res_sd = game_def.sprites[actor_indices[0]] if actor_indices else None
+        if res_sd is not None:
+            res_name = res_sd.resource_name or res_sd.key
+            kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
+            kwargs['resource_value'] = res_sd.resource_value
+            kwargs['limit'] = resource_limits[kwargs['resource_idx']] if resource_limits else 100
+        kwargs['avatar_type_idx'] = avatar_type_idx
+
+    elif ed.effect_type == EffectType.TRANSFORM_OTHERS_TO:
+        target_stype = ed.kwargs.get('target', '')
+        target_indices = game_def.resolve_stype(target_stype)
+        if target_indices:
+            kwargs['target_type_idx'] = target_indices[0]
+        new_stype = ed.kwargs.get('stype', '')
+        new_indices = game_def.resolve_stype(new_stype)
+        if new_indices:
+            kwargs['new_type_idx'] = new_indices[0]
 
     elif ed.effect_type in (EffectType.WALL_STOP, EffectType.WALL_BOUNCE,
                              EffectType.BOUNCE_DIRECTION):

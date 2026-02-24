@@ -25,6 +25,13 @@ def check_timeout(state, limit, win):
     return state.step_count >= limit, jnp.bool_(win)
 
 
+def check_resource_counter(state, avatar_type_idx, resource_idx, limit, win):
+    """Game ends when avatar's resource count >= limit."""
+    count = state.resources[avatar_type_idx, 0, resource_idx]
+    ended = count >= limit
+    return ended, jnp.bool_(win)
+
+
 def check_all_terminations(state, compiled_terminations):
     """Check terminations in order. First matching condition wins."""
     done = jnp.bool_(False)

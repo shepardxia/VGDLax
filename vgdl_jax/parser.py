@@ -30,13 +30,24 @@ CLASS_MAP = {
     'Bomber': SpriteClass.BOMBER,
     'Walker': SpriteClass.WALKER,
     'Portal': SpriteClass.PORTAL,
+    'Conveyor': SpriteClass.CONVEYOR,
+    'ErraticMissile': SpriteClass.ERRATIC_MISSILE,
+    'RandomInertial': SpriteClass.RANDOM_INERTIAL,
+    'RandomMissile': SpriteClass.RANDOM_MISSILE,
     'MovingAvatar': SpriteClass.MOVING_AVATAR,
     'FlakAvatar': SpriteClass.FLAK_AVATAR,
     'ShootAvatar': SpriteClass.SHOOT_AVATAR,
     'HorizontalAvatar': SpriteClass.HORIZONTAL_AVATAR,
-    'VerticalAvatar': SpriteClass.HORIZONTAL_AVATAR,
+    'VerticalAvatar': SpriteClass.VERTICAL_AVATAR,
     'OrientedAvatar': SpriteClass.ORIENTED_AVATAR,
-    'RotatingAvatar': SpriteClass.ORIENTED_AVATAR,
+    'RotatingAvatar': SpriteClass.ROTATING_AVATAR,
+    'RotatingFlippingAvatar': SpriteClass.ROTATING_FLIPPING_AVATAR,
+    'NoisyRotatingFlippingAvatar': SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR,
+    'ShootEverywhereAvatar': SpriteClass.SHOOT_EVERYWHERE_AVATAR,
+    'AimedAvatar': SpriteClass.AIMED_AVATAR,
+    'AimedFlakAvatar': SpriteClass.AIMED_FLAK_AVATAR,
+    'Spreader': SpriteClass.SPREADER,
+    'WalkJumper': SpriteClass.WALK_JUMPER,
     'InertialAvatar': SpriteClass.INERTIAL_AVATAR,
     'MarioAvatar': SpriteClass.MARIO_AVATAR,
 }
@@ -63,6 +74,21 @@ EFFECT_MAP = {
     'wallStop': EffectType.WALL_STOP,
     'wallBounce': EffectType.WALL_BOUNCE,
     'bounceDirection': EffectType.BOUNCE_DIRECTION,
+    'flipDirection': EffectType.FLIP_DIRECTION,
+    'killIfAlive': EffectType.KILL_IF_ALIVE,
+    'killIfSlow': EffectType.KILL_IF_SLOW,
+    'conveySprite': EffectType.CONVEY_SPRITE,
+    'cloneSprite': EffectType.CLONE_SPRITE,
+    'spawnIfHasMore': EffectType.SPAWN_IF_HAS_MORE,
+    'windGust': EffectType.WIND_GUST,
+    'slipForward': EffectType.SLIP_FORWARD,
+    'attractGaze': EffectType.ATTRACT_GAZE,
+    'SpendResource': EffectType.SPEND_RESOURCE,
+    'SpendAvatarResource': EffectType.SPEND_AVATAR_RESOURCE,
+    'KillOthers': EffectType.KILL_OTHERS,
+    'KillIfAvatarWithoutResource': EffectType.KILL_IF_AVATAR_WITHOUT_RESOURCE,
+    'AvatarCollectResource': EffectType.AVATAR_COLLECT_RESOURCE,
+    'TransformOthersTo': EffectType.TRANSFORM_OTHERS_TO,
 }
 
 # py-vgdl uses Vector2(x, y) with screen coords: UP=(0,-1), DOWN=(0,1)
@@ -298,7 +324,15 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         SpriteClass.SHOOT_AVATAR, SpriteClass.RANDOM_NPC,
         SpriteClass.CHASER, SpriteClass.FLEEING,
         SpriteClass.MISSILE, SpriteClass.WALKER, SpriteClass.BOMBER,
+        SpriteClass.ERRATIC_MISSILE, SpriteClass.RANDOM_INERTIAL,
+        SpriteClass.RANDOM_MISSILE,
         SpriteClass.INERTIAL_AVATAR, SpriteClass.MARIO_AVATAR,
+        SpriteClass.VERTICAL_AVATAR, SpriteClass.ROTATING_AVATAR,
+        SpriteClass.ROTATING_FLIPPING_AVATAR,
+        SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR,
+        SpriteClass.SHOOT_EVERYWHERE_AVATAR,
+        SpriteClass.AIMED_AVATAR, SpriteClass.AIMED_FLAK_AVATAR,
+        SpriteClass.WALK_JUMPER,
     }
     default_speed = 1.0 if sc in SPEED_1_CLASSES else 0.0
     speed = args.get('speed', default_speed)
@@ -316,13 +350,14 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         orientation = (0.0, 1.0)  # default RIGHT in (row, col)
 
     is_static = sc in (SpriteClass.IMMOVABLE, SpriteClass.PASSIVE,
-                       SpriteClass.RESOURCE, SpriteClass.PORTAL)
+                       SpriteClass.RESOURCE, SpriteClass.PORTAL,
+                       SpriteClass.CONVEYOR)
 
     singleton = bool(args.get('singleton', False))
 
     # Flicker limit — only applies to Flicker/OrientedFlicker classes
     # (For Resource sprites, 'limit' means resource capacity, not expiry)
-    if sc in (SpriteClass.FLICKER, SpriteClass.ORIENTED_FLICKER):
+    if sc in (SpriteClass.FLICKER, SpriteClass.ORIENTED_FLICKER, SpriteClass.SPREADER):
         flicker_limit = int(args.get('limit', 0))
     else:
         flicker_limit = 0
@@ -375,9 +410,9 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
 
     # Physics type inference
     physics_type = 'grid'
-    if sc == SpriteClass.INERTIAL_AVATAR:
+    if sc in (SpriteClass.INERTIAL_AVATAR, SpriteClass.RANDOM_INERTIAL):
         physics_type = 'continuous'
-    elif sc == SpriteClass.MARIO_AVATAR:
+    elif sc in (SpriteClass.MARIO_AVATAR, SpriteClass.WALK_JUMPER):
         physics_type = 'gravity'
     # Explicit physicstype kwarg overrides
     pt_kwarg = args.get('physicstype', None)
@@ -390,6 +425,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     strength = float(args.get('strength', 3.0 if sc == SpriteClass.MARIO_AVATAR else 1.0))
     jump_strength = float(args.get('jump_strength', 10.0))
     airsteering = bool(args.get('airsteering', False))
+    angle_diff = float(args.get('angle_diff', 0.05))
 
     return SpriteDef(
         key=key,
@@ -417,6 +453,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         strength=strength,
         jump_strength=jump_strength,
         airsteering=airsteering,
+        angle_diff=angle_diff,
     )
 
 
@@ -450,6 +487,9 @@ def _build_effect_def(actor, actee, effect_name, kwargs):
             eff_kwargs['limit'] = int(kwargs['limit'])
     elif et == EffectType.TELEPORT_TO_EXIT:
         pass  # resolved at compile time from portal's stype
+    elif et == EffectType.KILL_IF_SLOW:
+        if 'limitspeed' in kwargs:
+            eff_kwargs['limitspeed'] = float(kwargs['limitspeed'])
     elif et in (EffectType.WALL_STOP, EffectType.WALL_BOUNCE,
                 EffectType.BOUNCE_DIRECTION):
         if 'friction' in kwargs:
@@ -499,6 +539,16 @@ def _build_termination_def(class_name, kwargs):
             win=bool(kwargs.get('win', False)),
             score_change=int(kwargs.get('scoreChange', 0)),
             kwargs={
+                'limit': int(kwargs.get('limit', 0)),
+            },
+        )
+    elif class_name == 'ResourceCounter':
+        return TerminationDef(
+            term_type=TerminationType.RESOURCE_COUNTER,
+            win=bool(kwargs.get('win', False)),
+            score_change=int(kwargs.get('scoreChange', 0)),
+            kwargs={
+                'resource': kwargs.get('resource', ''),
                 'limit': int(kwargs.get('limit', 0)),
             },
         )
