@@ -2,6 +2,7 @@
 Compiler: converts a GameDef (parsed VGDL) into a jit-compiled step function
 and an initial GameState.
 """
+import math
 from dataclasses import dataclass
 from collections import defaultdict
 from typing import Callable
@@ -22,6 +23,7 @@ class CompiledGame:
     init_state: GameState
     step_fn: Callable
     n_actions: int
+    noop_action: int
     game_def: GameDef
 
 
@@ -129,7 +131,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             speeds=state.speeds.at[type_idx, slot].set(
                 jnp.float32(sd.speed)),
             cooldown_timers=state.cooldown_timers.at[type_idx, slot].set(
-                jnp.int32(sd.cooldown)),
+                jnp.int32(0)),
         )
         slot_counts[type_idx] += 1
 
@@ -172,7 +174,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             else:
                 proj_default_ori = list(proj_sd.orientation)
                 proj_ori_from_avatar = False
-        shoot_action_idx = n_move
+        shoot_action_idx = n_move + 1  # NOOP is n_move, SHOOT is n_move+1
 
     n_actions = n_move + (1 if can_shoot else 0) + 1  # +1 for NOOP
 
@@ -212,12 +214,9 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     # ── 3. Build sprite configs ────────────────────────────────────────
     sprite_configs = []
     for sd in game_def.sprites:
-        # Compute effective cooldown from speed
+        # Speed is now a movement multiplier applied in sprites.py, not a cooldown divisor
         base_cooldown = max(sd.cooldown, 1)
-        if sd.speed > 0 and sd.speed != 1.0:
-            effective_cooldown = max(1, round(base_cooldown / sd.speed))
-        else:
-            effective_cooldown = base_cooldown
+        effective_cooldown = base_cooldown
 
         cfg = dict(
             sprite_class=sd.sprite_class,
@@ -266,6 +265,11 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     # Determine which types use continuous physics (for per-pair AABB)
     continuous_types = {sd.type_idx for sd in game_def.sprites
                         if sd.physics_type in ('continuous', 'gravity')}
+    # Types with fractional speed also need AABB collision
+    fractional_speed_types = {sd.type_idx for sd in game_def.sprites
+                               if sd.speed != 1.0 and sd.speed > 0}
+    # Build speed lookup for sweep flag computation
+    _speed_by_idx = {sd.type_idx: sd.speed for sd in game_def.sprites}
 
     compiled_effects = []
     for ed in game_def.effects:
@@ -288,6 +292,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             actee_indices = game_def.resolve_stype(ed.actee_stype)
             for ta_idx in actor_indices:
                 for tb_idx in actee_indices:
+                    speed_a = _speed_by_idx.get(ta_idx, 1.0)
+                    speed_b = _speed_by_idx.get(tb_idx, 1.0)
                     compiled_effects.append(dict(
                         type_a=ta_idx,
                         type_b=tb_idx,
@@ -295,7 +301,11 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                         effect_type=_effect_type_str(ed.effect_type),
                         score_change=ed.score_change,
                         use_aabb=(ta_idx in continuous_types or
-                                  tb_idx in continuous_types),
+                                  tb_idx in continuous_types or
+                                  ta_idx in fractional_speed_types or
+                                  tb_idx in fractional_speed_types),
+                        needs_sweep=(speed_a > 1.0 or speed_b > 1.0),
+                        max_speed_cells=max(1, math.ceil(max(speed_a, speed_b))),
                         kwargs=_compile_effect_kwargs(
                             ed, game_def, resource_name_to_idx, resource_limits,
                             concrete_actor_idx=ta_idx, concrete_actee_idx=tb_idx,
@@ -346,10 +356,13 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     step_fn = build_step_fn(compiled_effects, compiled_terminations,
                             sprite_configs, avatar_config, params)
 
+    noop_action = n_move  # NOOP is right after movement actions
+
     return CompiledGame(
         init_state=state,
         step_fn=step_fn,
         n_actions=n_actions,
+        noop_action=noop_action,
         game_def=game_def,
     )
 

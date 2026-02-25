@@ -30,6 +30,7 @@ class VGDLJaxEnv:
         game_def = parse_vgdl(game_file, level_file)
         self.compiled = compile_game(game_def, max_sprites_per_type)
         self.n_actions = self.compiled.n_actions
+        self.noop_action = self.compiled.noop_action
         n_types = len(game_def.sprites)
         self._height = game_def.level.height
         self._width = game_def.level.width

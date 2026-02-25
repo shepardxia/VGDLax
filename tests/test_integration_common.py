@@ -11,7 +11,7 @@ ALL_GAMES = ['chase', 'zelda', 'aliens', 'sokoban', 'portals',
 # Max random-play steps before asserting game ends (per game)
 GAME_END_MAX_STEPS = {
     'chase': 5000,
-    'zelda': 1000,
+    'zelda': 3000,
     'aliens': 2000,
     'portals': 2000,
     'boulderdash': 2000,

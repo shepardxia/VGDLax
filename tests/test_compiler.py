@@ -28,7 +28,7 @@ def test_compile_chase_step():
     state = compiled.init_state
 
     # Take a NOOP action
-    noop = compiled.n_actions - 1
+    noop = compiled.noop_action
     new_state = compiled.step_fn(state, noop)
     assert new_state.step_count == 1
     assert new_state.done == False
@@ -42,7 +42,7 @@ def test_compile_zelda():
     state = compiled.init_state
     assert state.alive.sum() > 0
 
-    noop = compiled.n_actions - 1
+    noop = compiled.noop_action
     new_state = compiled.step_fn(state, noop)
     assert new_state.step_count == 1
 
@@ -55,6 +55,6 @@ def test_compile_aliens():
     state = compiled.init_state
     assert state.alive.sum() > 0
 
-    noop = compiled.n_actions - 1
+    noop = compiled.noop_action
     new_state = compiled.step_fn(state, noop)
     assert new_state.step_count == 1

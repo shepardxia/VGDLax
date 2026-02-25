@@ -131,14 +131,74 @@ class RNGRecorder:
                 exit_type = eff.get('kwargs', {}).get('exit_type_idx', -1)
                 if exit_type >= 0:
                     rng, key = jax.random.split(rng)
-                    # The actual value depends on n_exits at runtime,
-                    # so we record the key itself for later replay
-                    record[('teleport', eff['type_a'])] = {
+                    # Record the key for teleport destination selection
+                    record[('teleport', eff['type_a'], eff['type_b'])] = {
                         'class': 'teleport_to_exit',
                         'key_array': np.array(key),
                     }
 
         return record, rng
+
+
+def patch_chaser_directions(record, prev_jax_state, sprite_configs,
+                            height, width):
+    """Recompute actual chaser/fleeing directions using the distance field.
+
+    Instead of extracting directions from position deltas (which fails for
+    stepBacked sprites), this recomputes the distance field and argmin/argmax
+    exactly as update_chaser does, producing the correct intended direction.
+
+    Args:
+        record: the step record from RNGRecorder.record_step()
+        prev_jax_state: JAX GameState BEFORE the step (same state chaser sees)
+        sprite_configs: list of sprite config dicts
+        height: grid height
+        width: grid width
+    """
+    from vgdl_jax.sprites import _manhattan_distance_field
+
+    for type_idx, cfg in enumerate(sprite_configs):
+        sc = cfg['sprite_class']
+        if sc not in (SpriteClass.CHASER, SpriteClass.FLEEING):
+            continue
+        if type_idx not in record:
+            continue
+
+        fleeing = (sc == SpriteClass.FLEEING)
+        target_type_idx = cfg.get('target_type_idx', 0)
+
+        chaser_pos = prev_jax_state.positions[type_idx].astype(jnp.int32)
+        target_pos = prev_jax_state.positions[target_type_idx]
+        target_alive = prev_jax_state.alive[target_type_idx]
+        any_target_alive = bool(jnp.any(target_alive))
+
+        if not any_target_alive:
+            # No targets — keep fallback random direction (already recorded)
+            continue
+
+        # Recompute distance field (same as update_chaser)
+        dist_field = _manhattan_distance_field(target_pos, target_alive,
+                                               height, width)
+
+        r = np.array(jnp.clip(chaser_pos[:, 0], 0, height - 1))
+        c = np.array(jnp.clip(chaser_pos[:, 1], 0, width - 1))
+        INF = height + width
+        d_up = np.where(r > 0,
+                        np.array(dist_field)[np.clip(r - 1, 0, height - 1), c], INF)
+        d_down = np.where(r < height - 1,
+                          np.array(dist_field)[np.clip(r + 1, 0, height - 1), c], INF)
+        d_left = np.where(c > 0,
+                          np.array(dist_field)[r, np.clip(c - 1, 0, width - 1)], INF)
+        d_right = np.where(c < width - 1,
+                           np.array(dist_field)[r, np.clip(c + 1, 0, width - 1)], INF)
+
+        neighbor_dists = np.stack([d_up, d_down, d_left, d_right], axis=-1)
+        if fleeing:
+            best_dir = np.argmax(neighbor_dists, axis=-1)
+        else:
+            best_dir = np.argmin(neighbor_dists, axis=-1)
+
+        record[type_idx]['dir_indices'] = best_dir.astype(np.int32)
 
 
 class ReplayRandomGenerator:
@@ -197,13 +257,21 @@ class ReplayRandomGenerator:
         return self._record.get(type_idx)
 
     def choice(self, options):
-        """Replace random.choice — used by RandomNPC, Chaser, Fleeing.
+        """Replace random.choice — used by RandomNPC, Chaser, Fleeing, teleport.
 
-        For direction choices (options is BASEDIRS), look up the recorded
+        For direction choices (options is a list of tuples), look up the recorded
         JAX direction index and map it to the corresponding BASEDIRS entry.
 
-        For other choices (len(options) != 4), fall back to first option.
+        For non-direction choices (e.g., teleport exit sprites), use the recorded
+        JAX key to deterministically pick the same index JAX would.
         """
+        if not options:
+            return None
+
+        # Detect non-direction choice (teleport: options are Sprite objects)
+        if not isinstance(options[0], tuple):
+            return self._teleport_choice(options)
+
         rec = self._get_type_record()
         if rec is not None and 'dir_indices' in rec:
             jax_dir = int(rec['dir_indices'][self._current_slot])
@@ -213,11 +281,10 @@ class ReplayRandomGenerator:
                 basedirs_idx = JAX_TO_BASEDIRS[jax_dir]
                 return options[basedirs_idx]
 
-            # For Chaser: options might be a subset of BASEDIRS (good moves)
-            # The JAX engine uses distance field argmin, which may pick a
-            # direction not in the py-vgdl "options" list. We use the JAX
-            # direction unconditionally since we want to match JAX behavior.
-            # Convert JAX dir to BASEDIRS-style vector for matching.
+            # For Chaser/Fleeing: options is a subset of BASEDIRS (good moves).
+            # After patch_chaser_directions, dir_indices contains the actual
+            # direction JAX moved. Map it to BASEDIRS and return it —
+            # even if not in options — to match JAX behavior.
             from vgdl.ontology.constants import BASEDIRS
             basedirs_idx = JAX_TO_BASEDIRS[jax_dir]
             target_dir = BASEDIRS[basedirs_idx]
@@ -235,6 +302,19 @@ class ReplayRandomGenerator:
         if options:
             return options[0]
         return None
+
+    def _teleport_choice(self, options):
+        """Handle teleport exit selection using recorded JAX key."""
+        # Find matching teleport record
+        for key, rec in self._record.items():
+            if isinstance(key, tuple) and key[0] == 'teleport':
+                key_array = rec.get('key_array')
+                if key_array is not None:
+                    jax_key = jnp.array(key_array, dtype=jnp.uint32)
+                    idx = int(jax.random.randint(jax_key, (), 0, len(options)))
+                    return options[idx]
+        # Fallback: first option
+        return options[0]
 
     def random(self):
         """Replace random.random() — used by SpawnPoint prob check.

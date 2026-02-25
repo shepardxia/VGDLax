@@ -259,7 +259,7 @@ def test_cross_engine_initial_state(game):
 def test_cross_engine_deterministic(game):
     """Deterministic games must match exactly for 30 steps."""
     compiled, _ = _setup_jax_game(game)
-    noop_idx = compiled.n_actions - 1
+    noop_idx = compiled.noop_action
 
     # Cycle through all actions for broader coverage
     actions = [i % compiled.n_actions for i in range(30)]
@@ -280,7 +280,7 @@ def test_cross_engine_with_rng_replay(game):
     compiled, _ = _setup_jax_game(game)
 
     # Use NOOP to isolate NPC behavior
-    noop_idx = compiled.n_actions - 1
+    noop_idx = compiled.noop_action
     actions = [noop_idx] * 20
 
     result = run_comparison(game, actions, seed=42, use_rng_replay=True)
@@ -302,7 +302,7 @@ def test_cross_engine_with_rng_replay(game):
 def test_jax_trajectory_runs(game):
     """vgdl-jax runs a 30-step trajectory without error."""
     compiled, _ = _setup_jax_game(game)
-    noop_idx = compiled.n_actions - 1
+    noop_idx = compiled.noop_action
     actions = [noop_idx] * 30
 
     states = run_jax_trajectory(game, actions, seed=42)

@@ -43,6 +43,18 @@ class TrajectoryResult:
     level: int  # highest passing validation level (0-4)
 
 
+_POS_TOL = 1e-4  # tolerance for float32 vs float64 position comparison
+
+
+def _positions_close(pos_a, pos_b, tol=_POS_TOL):
+    """Check if two position lists match within tolerance."""
+    if len(pos_a) != len(pos_b):
+        return False
+    return all(
+        abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
+        for a, b in zip(pos_a, pos_b))
+
+
 def compare_states(state_a, state_b):
     """Field-by-field comparison of two normalized state dicts.
 
@@ -83,7 +95,7 @@ def compare_states(state_a, state_b):
 
         pos_a = ta['positions']
         pos_b = tb['positions']
-        if pos_a != pos_b:
+        if not _positions_close(pos_a, pos_b):
             diffs.append(
                 f"{key}(t{tidx}): positions differ "
                 f"(a={pos_a[:3]}{'...' if len(pos_a) > 3 else ''} "
@@ -215,7 +227,8 @@ def validate_pyvgdl_trajectory(game_name, n_steps=50, seed=42):
     """
     try:
         game, action_keys, _ = _setup_pyvgdl_game(game_name)
-        noop_idx = len(action_keys) - 1  # NOOP is always last
+        # Find NOOP action index (Action with empty keys tuple)
+        noop_idx = next(i for i, a in enumerate(action_keys) if a.keys == ())
         actions = [noop_idx] * n_steps
 
         states = run_pyvgdl_trajectory(game_name, actions, seed=seed)
@@ -336,6 +349,8 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
     )]
 
     # ── Step through actions ──
+    sprite_configs = _get_sprite_configs_from_compiled(compiled) if recorder else None
+
     for i, action_idx in enumerate(actions):
         pv_done = game.ended
         jx_done = bool(jax_state.done)
@@ -346,13 +361,21 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
         # RNG replay: record this step's draws before stepping
         if recorder is not None:
             record, rng_key = recorder.record_step(rng_key, max_n=max_n)
-            rng_replay.set_step_record(record)
 
-        # Step both engines
-        if not pv_done:
-            game.tick(action_keys[action_idx])
+        # Step JAX first (so we can extract actual chaser directions)
+        prev_jax_state = jax_state
         if not jx_done:
             jax_state = compiled.step_fn(jax_state, action_idx)
+
+        # Patch chaser directions using distance field, then step py-vgdl
+        if recorder is not None:
+            from rng_replay import patch_chaser_directions
+            patch_chaser_directions(record, prev_jax_state, sprite_configs,
+                                    game_def.level.height, game_def.level.width)
+            rng_replay.set_step_record(record)
+
+        if not pv_done:
+            game.tick(action_keys[action_idx])
 
         pv_state = extract_pyvgdl_state(game, sprite_key_order, block_size)
         jx_state = extract_jax_state(jax_state, game_def)

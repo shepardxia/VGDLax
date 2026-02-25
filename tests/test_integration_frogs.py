@@ -20,7 +20,7 @@ def test_frogs_trucks_wrap():
     # Run enough steps for trucks to hit edges
     for i in range(100):
         rng, key = jax.random.split(rng)
-        action = env.n_actions - 1  # NOOP
+        action = env.noop_action  # NOOP
         obs, state, reward, done, info = env.step(state, action)
         if done:
             break

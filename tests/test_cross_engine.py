@@ -209,9 +209,10 @@ def test_action_sequence_chase():
     pyvgdl_env = _setup_pyvgdl('chase')
     compiled, state, gd = _setup_jax('chase')
 
-    # NOOP is last action in both engines
+    # NOOP: py-vgdl uses n-1 (valid for MovingAvatar which has no shoot),
+    # vgdl-jax uses explicit noop_action index
     noop_pyvgdl = pyvgdl_env.action_space.n - 1
-    noop_jax = compiled.n_actions - 1
+    noop_jax = compiled.noop_action
 
     for step_i in range(5):
         pyvgdl_obs, _, pyvgdl_done, _ = pyvgdl_env.step(noop_pyvgdl)

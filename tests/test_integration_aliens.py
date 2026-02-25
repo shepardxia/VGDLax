@@ -14,8 +14,8 @@ def test_aliens_flak_shoots_missile():
     # Initially no sam missile
     assert state.alive[sam_idx].sum() == 0
 
-    # FlakAvatar: actions are LEFT=0, RIGHT=1, SHOOT=2, NOOP=3
-    shoot_action = 2
+    # FlakAvatar: actions are LEFT=0, RIGHT=1, NOOP=2, SHOOT=3
+    shoot_action = 3
     obs, state, _, _, _ = env.step(state, shoot_action)
 
     # Sam missile should be spawned
@@ -32,12 +32,13 @@ def test_aliens_missile_moves_up():
     sam_idx = gd.type_idx('sam')
 
     # Shoot to create missile
-    obs, state, _, _, _ = env.step(state, 2)
+    shoot_action = 3  # FlakAvatar: LEFT=0, RIGHT=1, NOOP=2, SHOOT=3
+    obs, state, _, _, _ = env.step(state, shoot_action)
     assert state.alive[sam_idx].sum() == 1
     sam_pos_0 = state.positions[sam_idx, 0].copy()
 
     # NOOP to let missile move
-    obs, state, _, _, _ = env.step(state, 3)  # NOOP
+    obs, state, _, _, _ = env.step(state, env.noop_action)
 
     # Missile should move up (row decreases) or be dead (hit EOS or something)
     if state.alive[sam_idx, 0]:

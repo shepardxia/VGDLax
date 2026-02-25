@@ -250,6 +250,64 @@ def _collision_mask_aabb(state, type_a, type_b, height, width):
     return jnp.any(overlap, axis=1) & alive_a
 
 
+# ── Sweep collision detection (for speed > 1) ─────────────────────────
+
+
+def _build_swept_occupancy_grid(positions, prev_positions, alive,
+                                 height, width, max_speed_cells):
+    """Build a [H, W] boolean grid marking all cells along each sprite's path."""
+    grid = jnp.zeros((height, width), dtype=jnp.bool_)
+    iprev = prev_positions.astype(jnp.int32)
+    ipos = positions.astype(jnp.int32)
+    in_bounds = _in_bounds(ipos, height, width)
+    effective = alive & in_bounds
+
+    dir_row = jnp.sign(ipos[:, 0] - iprev[:, 0])
+    dir_col = jnp.sign(ipos[:, 1] - iprev[:, 1])
+    max_cells = jnp.maximum(
+        jnp.abs(ipos[:, 0] - iprev[:, 0]),
+        jnp.abs(ipos[:, 1] - iprev[:, 1]))
+
+    def mark_step(step_i, g):
+        r = jnp.clip(iprev[:, 0] + dir_row * step_i, 0, height - 1)
+        c = jnp.clip(iprev[:, 1] + dir_col * step_i, 0, width - 1)
+        valid = effective & (step_i <= max_cells)
+        return g.at[r, c].max(valid)
+
+    return jax.lax.fori_loop(0, max_speed_cells + 1, mark_step, grid)
+
+
+def _collision_mask_sweep(state, prev_positions, type_a, type_b,
+                           height, width, max_speed_cells):
+    """Sweep collision: checks if type_a's path overlaps with type_b's path."""
+    grid_b = _build_swept_occupancy_grid(
+        state.positions[type_b], prev_positions[type_b],
+        state.alive[type_b], height, width, max_speed_cells)
+
+    pos_a = state.positions[type_a]
+    prev_a = prev_positions[type_a]
+    alive_a = state.alive[type_a]
+
+    iprev_a = prev_a.astype(jnp.int32)
+    ipos_a = pos_a.astype(jnp.int32)
+    in_bounds_a = _in_bounds(ipos_a, height, width)
+
+    dir_row = jnp.sign(ipos_a[:, 0] - iprev_a[:, 0])
+    dir_col = jnp.sign(ipos_a[:, 1] - iprev_a[:, 1])
+    max_cells = jnp.maximum(
+        jnp.abs(ipos_a[:, 0] - iprev_a[:, 0]),
+        jnp.abs(ipos_a[:, 1] - iprev_a[:, 1]))
+
+    def check_step(step_i, hit):
+        r = jnp.clip(iprev_a[:, 0] + dir_row * step_i, 0, height - 1)
+        c = jnp.clip(iprev_a[:, 1] + dir_col * step_i, 0, width - 1)
+        valid = alive_a & in_bounds_a & (step_i <= max_cells)
+        return hit | (valid & grid_b[r, c])
+
+    init_hit = jnp.zeros_like(alive_a)
+    return jax.lax.fori_loop(0, max_speed_cells + 1, check_step, init_hit)
+
+
 # ── Masked effect application ─────────────────────────────────────────
 
 
@@ -273,7 +331,13 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
         else:
             type_b = eff['type_b']
             use_aabb = eff.get('use_aabb', False)
-            if use_aabb:
+            needs_sweep = eff.get('needs_sweep', False)
+            max_speed_cells = eff.get('max_speed_cells', 1)
+            if needs_sweep:
+                coll_mask = _collision_mask_sweep(
+                    state, prev_positions, type_a, type_b,
+                    height, width, max_speed_cells)
+            elif use_aabb:
                 coll_mask = _collision_mask_aabb(state, type_a, type_b, height, width)
             else:
                 coll_mask = _collision_mask(state, type_a, type_b, height, width)

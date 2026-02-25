@@ -10,7 +10,8 @@ def update_missile(state: GameState, type_idx, cooldown):
     """Move along fixed orientation each tick (if cooldown met and alive)."""
     can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
     delta = state.orientations[type_idx]  # [max_n, 2] float32
-    new_pos = state.positions[type_idx] + delta * can_move[:, None]
+    speed = state.speeds[type_idx]  # [max_n] float32
+    new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     return state.replace(
         positions=state.positions.at[type_idx].set(new_pos),
@@ -26,7 +27,8 @@ def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
     # Move along current orientation (same as missile)
     can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
     delta = state.orientations[type_idx]
-    new_pos = state.positions[type_idx] + delta * can_move[:, None]
+    speed = state.speeds[type_idx]  # [max_n] float32
+    new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
 
     # Randomly change direction with probability `prob`
@@ -51,7 +53,8 @@ def update_random_npc(state: GameState, type_idx, cooldown):
     # Random direction per instance
     dir_indices = jax.random.randint(key, (max_n,), 0, 4)
     deltas = DIRECTION_DELTAS[dir_indices]  # [max_n, 2]
-    new_pos = state.positions[type_idx] + deltas * can_move[:, None]
+    speed = state.speeds[type_idx]  # [max_n] float32
+    new_pos = state.positions[type_idx] + deltas * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     return state.replace(
         positions=state.positions.at[type_idx].set(new_pos),
@@ -129,7 +132,8 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
     rand_delta = DIRECTION_DELTAS[rand_dirs]
     delta = jnp.where(any_target_alive, delta, rand_delta)
 
-    new_pos = chaser_pos + delta * can_move[:, None]
+    speed = state.speeds[type_idx]  # [max_n] float32
+    new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     return state.replace(
         positions=state.positions.at[type_idx].set(new_pos),

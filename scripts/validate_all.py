@@ -53,19 +53,21 @@ OUTPUT_DIR = os.path.join(PROJECT_DIR, "validation_results")
 # ── Action sequence generators ───────────────────────────────────────────────
 
 
-def _make_actions(traj_type, n_actions, n_steps, seed=42):
+def _make_actions(traj_type, n_actions, n_steps, seed=42, noop_idx=None):
     """Generate an action sequence of the given type.
 
     Args:
         traj_type: one of 'noop', 'cycling', 'random'
-        n_actions: total number of actions available (NOOP is last)
+        n_actions: total number of actions available
         n_steps: trajectory length
         seed: random seed for 'random' type
+        noop_idx: explicit NOOP action index
 
     Returns:
         list[int] of action indices
     """
-    noop_idx = n_actions - 1
+    if noop_idx is None:
+        noop_idx = n_actions - 1
     if traj_type == "noop":
         return [noop_idx] * n_steps
     elif traj_type == "cycling":
@@ -116,6 +118,7 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
     try:
         compiled, game_def = _setup_jax_game(game_name)
         n_actions = compiled.n_actions
+        noop_idx = compiled.noop_action
     except Exception as e:
         game_result["status"] = "compile_error"
         game_result["errors"].append(f"JAX compile failed: {e}")
@@ -128,7 +131,8 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
     for traj_type in TRAJECTORY_TYPES:
         traj_key = f"trajectory_{traj_type}"
         try:
-            actions = _make_actions(traj_type, n_actions, n_steps, seed=seed)
+            actions = _make_actions(traj_type, n_actions, n_steps, seed=seed,
+                                    noop_idx=noop_idx)
 
             # Stochastic games use RNG replay; sokoban is deterministic
             use_rng = game_name != "sokoban"
