@@ -47,12 +47,28 @@ _POS_TOL = 1e-4  # tolerance for float32 vs float64 position comparison
 
 
 def _positions_close(pos_a, pos_b, tol=_POS_TOL):
-    """Check if two position lists match within tolerance."""
+    """Check if two position lists match within tolerance (order-independent).
+
+    Uses greedy nearest-neighbor matching to avoid false positives when
+    float32 rounding changes sort order of nearly-identical positions.
+    """
     if len(pos_a) != len(pos_b):
         return False
-    return all(
-        abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
-        for a, b in zip(pos_a, pos_b))
+    if not pos_a:
+        return True
+    remaining = list(pos_b)
+    for a in pos_a:
+        best_idx = None
+        best_dist = float('inf')
+        for j, b in enumerate(remaining):
+            d = max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+            if d < best_dist:
+                best_dist = d
+                best_idx = j
+        if best_dist >= tol:
+            return False
+        remaining.pop(best_idx)
+    return True
 
 
 def compare_states(state_a, state_b):
@@ -487,7 +503,10 @@ def _get_effects_from_compiled(compiled):
                         kwargs=dict(ed.kwargs),
                     )
                     if ed.effect_type == EffectType.TELEPORT_TO_EXIT:
-                        exit_stype = ed.kwargs.get('stype')
+                        # Resolve exit type from the actee portal sprite's
+                        # portal_exit_stype (not from effect kwargs).
+                        portal_sd = gd.sprites[tb_idx]
+                        exit_stype = portal_sd.portal_exit_stype
                         if exit_stype:
                             exit_indices = gd.resolve_stype(exit_stype)
                             eff['kwargs']['exit_type_idx'] = (

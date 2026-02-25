@@ -268,8 +268,15 @@ class ReplayRandomGenerator:
         if not options:
             return None
 
-        # Detect non-direction choice (teleport: options are Sprite objects)
-        if not isinstance(options[0], tuple):
+        # Detect direction choice: options are tuples or Vector2 (len-2 sequences)
+        # Non-direction choices (e.g. teleport exit Sprite objects) go to _teleport_choice
+        try:
+            _ = options[0][0], options[0][1]
+            is_direction = (len(options[0]) == 2)
+        except (TypeError, IndexError):
+            is_direction = False
+
+        if not is_direction:
             return self._teleport_choice(options)
 
         rec = self._get_type_record()
