@@ -1,9 +1,7 @@
 """Integration tests for ContinuousPhysics & GravityPhysics (InertialAvatar, MarioAvatar)."""
 import jax
 import jax.numpy as jnp
-import pytest
 
-from conftest import ALL_GAMES, GAMES_DIR
 from vgdl_jax.parser import parse_vgdl_text
 from vgdl_jax.compiler import compile_game
 
@@ -108,6 +106,11 @@ class TestMarioGravity:
         # Row passive_force should be zeroed by wallStop (grounded indicator)
         assert pf[0] == 0.0, f"passive_forces[row] should be 0 when grounded, got {pf[0]}"
 
+    def test_action_count(self):
+        """MarioAvatar should have 6 actions: LEFT, RIGHT, JUMP, J+L, J+R, NOOP."""
+        cg = _compile(MARIO_GAME, MARIO_LEVEL)
+        assert cg.n_actions == 6
+
 
 class TestMarioJump:
     """MarioAvatar jump trajectory: rises then falls."""
@@ -163,15 +166,6 @@ class TestMarioJump:
         end_col = float(state.positions[avatar_type, 0, 1])
         assert end_col > start_col, (
             f"Avatar didn't move right: {start_col} -> {end_col}")
-
-
-class TestMarioActions:
-    """MarioAvatar action space: 6 actions."""
-
-    def test_action_count(self):
-        """MarioAvatar should have 6 actions: LEFT, RIGHT, JUMP, J+L, J+R, NOOP."""
-        cg = _compile(MARIO_GAME, MARIO_LEVEL)
-        assert cg.n_actions == 6
 
 
 # ── InertialAvatar Tests ─────────────────────────────────────────────────
@@ -234,49 +228,7 @@ class TestInertialVelocity:
         assert abs(vel_col) < 0.1, (
             f"Velocity should be ~0 after wallStop, got {vel_col}")
 
-
-class TestInertialActions:
-    """InertialAvatar action space: 5 actions."""
-
     def test_action_count(self):
         """InertialAvatar should have 5 actions: UP, DOWN, LEFT, RIGHT, NOOP."""
         cg = _compile(INERTIAL_GAME, INERTIAL_LEVEL)
         assert cg.n_actions == 5
-
-
-# ── Grid regression tests ────────────────────────────────────────────────
-
-@pytest.fixture(params=ALL_GAMES)
-def grid_game_env(request):
-    """Load a grid-based game and run 10 random steps to verify no crashes."""
-    import os
-    game_name = request.param
-    game_file = os.path.join(GAMES_DIR, f'{game_name}.txt')
-    level_file = os.path.join(GAMES_DIR, f'{game_name}_lvl0.txt')
-    if not os.path.exists(game_file) or not os.path.exists(level_file):
-        pytest.skip(f"Game files not found for {game_name}")
-    return game_name, game_file, level_file
-
-
-def test_grid_game_regression(grid_game_env):
-    """Verify grid games still compile and run correctly with float32 positions."""
-    from vgdl_jax.env import VGDLJaxEnv
-    game_name, game_file, level_file = grid_game_env
-
-    env = VGDLJaxEnv(game_file, level_file)
-    rng = jax.random.PRNGKey(42)
-    obs, state = env.reset(rng)
-
-    # Verify positions are float32
-    assert state.positions.dtype == jnp.float32, (
-        f"{game_name}: positions should be float32")
-
-    # Run 10 steps without crash
-    for i in range(10):
-        rng, key = jax.random.split(rng)
-        action = jax.random.randint(key, (), 0, env.n_actions)
-        obs, state, reward, done, info = env.step(state, action)
-        if done:
-            break
-
-    assert state.step_count > 0

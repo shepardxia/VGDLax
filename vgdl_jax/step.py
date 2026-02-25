@@ -19,7 +19,7 @@ from vgdl_jax.sprites import (
     update_spawn_point, update_walk_jumper,
 )
 from vgdl_jax.terminations import check_all_terminations
-from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES
+from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES, PHYSICS_SCALE
 
 
 def build_step_fn(effects, terminations, sprite_configs, avatar_config, params):
@@ -139,6 +139,9 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params):
 
 def _build_occupancy_grid(positions, alive, height, width):
     """Build a [height, width] boolean grid from sprite positions."""
+    # Truncate float32 → int32 (floors toward zero). Correct for grid-physics
+    # sprites with integer positions. Fractional-speed pairs use AABB collision
+    # instead (see _collision_mask_aabb).
     ipos = positions.astype(jnp.int32)
     ib = in_bounds(ipos, height, width)
     effective = alive & ib
@@ -366,6 +369,20 @@ def _update_avatar(state, action, cfg, height, width):
     return state
 
 
+def _maybe_shoot(state, action, cfg, avatar_type):
+    """Conditionally spawn projectile using avatar's current orientation."""
+    is_shoot = (action == cfg['shoot_action_idx'])
+    proj_type = cfg['projectile_type_idx']
+    proj_speed = cfg['projectile_speed']
+    proj_ori = state.orientations[avatar_type, 0]
+    return jax.lax.cond(
+        is_shoot,
+        lambda s: spawn_sprite(s, avatar_type, 0, proj_type, proj_ori, proj_speed),
+        lambda s: s,
+        state,
+    )
+
+
 def _update_aimed_avatar(state, action, cfg, height, width):
     """Update AimedAvatar / AimedFlakAvatar: continuous-angle aiming + optional horizontal movement.
 
@@ -411,20 +428,8 @@ def _update_aimed_avatar(state, action, cfg, height, width):
         orientations=state.orientations.at[avatar_type, 0].set(new_ori),
     )
 
-    # Shoot
     if cfg['can_shoot']:
-        is_shoot = (action == cfg['shoot_action_idx'])
-        proj_type = cfg['projectile_type_idx']
-        proj_speed = cfg['projectile_speed']
-        proj_ori = state.orientations[avatar_type, 0]
-
-        state = jax.lax.cond(
-            is_shoot,
-            lambda s: spawn_sprite(s, avatar_type, 0, proj_type,
-                                    proj_ori, proj_speed),
-            lambda s: s,
-            state,
-        )
+        state = _maybe_shoot(state, action, cfg, avatar_type)
 
     return state
 
@@ -504,20 +509,8 @@ def _update_rotating_avatar(state, action, cfg, height, width):
         orientations=state.orientations.at[avatar_type, 0].set(new_ori),
     )
 
-    # Shoot (if configured)
     if cfg['can_shoot']:
-        is_shoot = (action == cfg['shoot_action_idx'])
-        proj_type = cfg['projectile_type_idx']
-        proj_speed = cfg['projectile_speed']
-        proj_ori = state.orientations[avatar_type, 0]
-
-        state = jax.lax.cond(
-            is_shoot,
-            lambda s: spawn_sprite(s, avatar_type, 0, proj_type,
-                                    proj_ori, proj_speed),
-            lambda s: s,
-            state,
-        )
+        state = _maybe_shoot(state, action, cfg, avatar_type)
 
     return state
 
@@ -594,8 +587,8 @@ def _update_npc(state, type_idx, cfg, height, width):
     elif sc == SpriteClass.WALK_JUMPER:
         return update_walk_jumper(state, type_idx,
                                    prob=cfg.get('prob', 0.1),
-                                   strength=cfg.get('strength', 10.0 / 24.0),
-                                   gravity=cfg.get('gravity', 1.0 / 24.0),
+                                   strength=cfg.get('strength', 10.0 / PHYSICS_SCALE),
+                                   gravity=cfg.get('gravity', 1.0 / PHYSICS_SCALE),
                                    mass=cfg.get('mass', 1.0))
 
     return state

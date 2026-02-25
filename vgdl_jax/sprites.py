@@ -22,24 +22,31 @@ def prefix_sum_allocate(alive_mask, source_mask):
             src_indices: [max_n] int — which source maps to each target slot
     """
     n_spawns = source_mask.sum()
+    # Dead slots in the target type are candidates for filling
     available = ~alive_mask
+    # Assign rank 1,2,3... to each dead slot via prefix-sum
     slot_rank = jnp.cumsum(available)
+    # Select the first N dead slots (one per source that wants to spawn)
     should_fill = available & (slot_rank <= n_spawns)
+    # argsort(~source_mask) puts True-valued sources first (False sorts as 0)
     source_order = jnp.argsort(~source_mask)
+    # Map each target slot to its corresponding source by rank lookup:
+    # slot with rank k gets source_order[k-1]
     src_indices = source_order[jnp.clip(slot_rank - 1, 0, source_mask.shape[0] - 1)]
     return should_fill, src_indices
 
 
-def _move_with_cooldown(state, type_idx, cooldown):
-    """Apply cooldown-gated movement along orientation.
+def _move_with_cooldown(state, type_idx, cooldown, deltas=None):
+    """Apply cooldown-gated movement. Uses orientations if deltas is None.
 
     Returns:
         (new_pos, new_timers, can_move)
     """
     can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
-    delta = state.orientations[type_idx]
+    if deltas is None:
+        deltas = state.orientations[type_idx]
     speed = state.speeds[type_idx]
-    new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
+    new_pos = state.positions[type_idx] + deltas * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     return new_pos, new_timers, can_move
 
@@ -81,14 +88,10 @@ def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
 def update_random_npc(state: GameState, type_idx, cooldown):
     """Pick a random direction each move."""
     rng, key = jax.random.split(state.rng)
-    can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
     max_n = state.alive.shape[1]
-    # Random direction per instance
     dir_indices = jax.random.randint(key, (max_n,), 0, 4)
-    deltas = DIRECTION_DELTAS[dir_indices]  # [max_n, 2]
-    speed = state.speeds[type_idx]
-    new_pos = state.positions[type_idx] + deltas * speed[:, None] * can_move[:, None]
-    new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
+    deltas = DIRECTION_DELTAS[dir_indices]
+    new_pos, new_timers, _ = _move_with_cooldown(state, type_idx, cooldown, deltas=deltas)
     return state.replace(
         positions=state.positions.at[type_idx].set(new_pos),
         cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
@@ -116,14 +119,11 @@ def _manhattan_distance_field(target_pos, target_alive, height, width):
     grid = grid.at[r, c].min(jnp.where(effective, jnp.int32(0), INF))
 
     def relax(_, dist):
-        up = jnp.concatenate([jnp.full((1, width), INF, jnp.int32),
-                              dist[:-1]], axis=0) + 1
-        down = jnp.concatenate([dist[1:],
-                                jnp.full((1, width), INF, jnp.int32)], axis=0) + 1
-        left = jnp.concatenate([jnp.full((height, 1), INF, jnp.int32),
-                                dist[:, :-1]], axis=1) + 1
-        right = jnp.concatenate([dist[:, 1:],
-                                 jnp.full((height, 1), INF, jnp.int32)], axis=1) + 1
+        padded = jnp.pad(dist, 1, mode='constant', constant_values=INF)
+        up    = padded[:-2, 1:-1] + 1
+        down  = padded[2:,  1:-1] + 1
+        left  = padded[1:-1, :-2] + 1
+        right = padded[1:-1, 2:]  + 1
         return jnp.minimum(dist, jnp.minimum(
             jnp.minimum(up, down), jnp.minimum(left, right)))
 

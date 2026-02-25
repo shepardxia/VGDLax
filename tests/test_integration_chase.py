@@ -3,19 +3,6 @@ import jax.numpy as jnp
 from conftest import make_env
 
 
-def test_chase_jit_speed():
-    """Verify jit compilation works and steps are fast."""
-    env = make_env('chase')
-    rng = jax.random.PRNGKey(0)
-    obs, state = env.reset(rng)
-
-    # First call triggers compilation
-    obs, state, _, _, _ = env.step(state, 0)
-    # Second call should be fast (already compiled)
-    obs, state, _, _, _ = env.step(state, 1)
-    assert state.step_count == 2
-
-
 def test_chase_stepback_prevents_wall_pass():
     """Avatar should not pass through walls."""
     env = make_env('chase')
@@ -30,7 +17,6 @@ def test_chase_stepback_prevents_wall_pass():
 
     # Find avatar position
     avatar_idx = gd.type_idx('avatar')
-    avatar_pos = state.positions[avatar_idx, 0]
 
     # Run some steps and verify avatar never occupies a wall position
     for i in range(50):

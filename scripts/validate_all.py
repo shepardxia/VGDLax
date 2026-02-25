@@ -23,27 +23,18 @@ import traceback
 
 import numpy as np
 
-# ── Path setup ───────────────────────────────────────────────────────────────
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.join(SCRIPT_DIR, "..")
-TESTS_DIR = os.path.join(PROJECT_DIR, "tests")
-sys.path.insert(0, TESTS_DIR)
-sys.path.insert(0, os.path.join(PROJECT_DIR, "..", "py-vgdl"))
-
-from validate_harness import (
+from vgdl_jax.validate.constants import ALL_GAMES
+from vgdl_jax.validate.harness import (
     run_comparison,
     compare_states,
-    _setup_jax_game,
-    _setup_pyvgdl_game,
+    setup_jax_game,
+    setup_pyvgdl_game,
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-ALL_GAMES = [
-    "chase", "zelda", "aliens", "missilecommand", "sokoban",
-    "portals", "boulderdash", "survivezombies", "frogs",
-]
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.join(SCRIPT_DIR, "..")
 
 TRAJECTORY_TYPES = ["noop", "cycling", "random"]
 
@@ -116,7 +107,7 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
 
     # Get n_actions from JAX compiled game
     try:
-        compiled, game_def = _setup_jax_game(game_name)
+        compiled, game_def = setup_jax_game(game_name)
         n_actions = compiled.n_actions
         noop_idx = compiled.noop_action
     except Exception as e:
@@ -442,7 +433,7 @@ def _render_jax_frames(game_name, actions, seed=42, block_size=24):
     import jax
     from vgdl_jax.render import render_pygame
 
-    compiled, game_def = _setup_jax_game(game_name)
+    compiled, game_def = setup_jax_game(game_name)
     state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
     step_fn = compiled.step_fn
 

@@ -12,7 +12,6 @@ Usage:
     python scripts/bfs_solve.py --max-iter 500000    # increase budget
 """
 import os
-import sys
 import json
 import time
 import argparse
@@ -23,21 +22,11 @@ import numpy as np
 # ── Path setup ────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.join(SCRIPT_DIR, '..')
-sys.path.insert(0, PROJECT_DIR)
 
-GAMES_DIR = os.path.join(PROJECT_DIR, '..', 'py-vgdl', 'vgdl', 'games')
+from vgdl_jax.validate.constants import ALL_GAMES, STOCHASTIC_GAMES, GAMES_DIR
+
 RESULTS_DIR = os.path.join(PROJECT_DIR, 'validation_results')
 TABLES_DIR = os.path.join(RESULTS_DIR, 'tables')
-
-ALL_GAMES = [
-    'chase', 'zelda', 'aliens', 'missilecommand',
-    'sokoban', 'portals', 'boulderdash', 'survivezombies', 'frogs',
-]
-
-STOCHASTIC_GAMES = {
-    'chase', 'zelda', 'aliens', 'missilecommand',
-    'portals', 'boulderdash', 'survivezombies', 'frogs',
-}
 
 
 # ── State hashing ─────────────────────────────────────────────────────

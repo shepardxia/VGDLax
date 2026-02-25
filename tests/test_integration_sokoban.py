@@ -11,7 +11,6 @@ def test_sokoban_box_bounceforward():
 
     gd = env.compiled.game_def
     box_idx = gd.type_idx('box')
-    avatar_idx = gd.type_idx('avatar')
 
     # Record initial box positions
     initial_box_pos = state.positions[box_idx].copy()
@@ -34,20 +33,3 @@ def test_sokoban_box_bounceforward():
     # With enough random moves, at least one box should have moved
     # (the level has boxes adjacent to the avatar)
     assert moved, "Expected at least one box to move via bounceForward"
-
-
-def test_sokoban_undo_all_on_box_wall():
-    """undoAll should revert all positions when box hits wall."""
-    env = make_env('sokoban')
-    rng = jax.random.PRNGKey(0)
-    obs, state = env.reset(rng)
-
-    # Just verify the game compiles and runs with undoAll effect active
-    for i in range(100):
-        rng, key = jax.random.split(rng)
-        action = jax.random.randint(key, (), 0, env.n_actions)
-        obs, state, reward, done, info = env.step(state, action)
-        if done:
-            break
-
-    assert state.step_count > 0

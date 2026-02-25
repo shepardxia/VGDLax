@@ -4,9 +4,10 @@ Reads .txt game files and level files, produces a GameDef.
 """
 from collections import defaultdict
 from vgdl_jax.data_model import (
-    SpriteClass, EffectType, TerminationType,
+    SpriteClass, TerminationType,
     SpriteDef, EffectDef, TerminationDef, LevelDef, GameDef,
 )
+from vgdl_jax.effects import VGDL_TO_KEY
 
 
 # ── Class name → SpriteClass mapping ──────────────────────────────────
@@ -50,44 +51,8 @@ CLASS_MAP = {
     'MarioAvatar': SpriteClass.MARIO_AVATAR,
 }
 
-EFFECT_MAP = {
-    'killSprite': EffectType.KILL_SPRITE,
-    'killBoth': EffectType.KILL_BOTH,
-    'stepBack': EffectType.STEP_BACK,
-    'transformTo': EffectType.TRANSFORM_TO,
-    'turnAround': EffectType.TURN_AROUND,
-    'reverseDirection': EffectType.REVERSE_DIRECTION,
-    'changeResource': EffectType.CHANGE_RESOURCE,
-    'collectResource': EffectType.COLLECT_RESOURCE,
-    'killIfHasLess': EffectType.KILL_IF_HAS_LESS,
-    'killIfHasMore': EffectType.KILL_IF_HAS_MORE,
-    'killIfOtherHasMore': EffectType.KILL_IF_OTHER_HAS_MORE,
-    'killIfOtherHasLess': EffectType.KILL_IF_OTHER_HAS_LESS,
-    'killIfFromAbove': EffectType.KILL_IF_FROM_ABOVE,
-    'wrapAround': EffectType.WRAP_AROUND,
-    'bounceForward': EffectType.BOUNCE_FORWARD,
-    'undoAll': EffectType.UNDO_ALL,
-    'teleportToExit': EffectType.TELEPORT_TO_EXIT,
-    'pullWithIt': EffectType.PULL_WITH_IT,
-    'wallStop': EffectType.WALL_STOP,
-    'wallBounce': EffectType.WALL_BOUNCE,
-    'bounceDirection': EffectType.BOUNCE_DIRECTION,
-    'flipDirection': EffectType.FLIP_DIRECTION,
-    'killIfAlive': EffectType.KILL_IF_ALIVE,
-    'killIfSlow': EffectType.KILL_IF_SLOW,
-    'conveySprite': EffectType.CONVEY_SPRITE,
-    'cloneSprite': EffectType.CLONE_SPRITE,
-    'spawnIfHasMore': EffectType.SPAWN_IF_HAS_MORE,
-    'windGust': EffectType.WIND_GUST,
-    'slipForward': EffectType.SLIP_FORWARD,
-    'attractGaze': EffectType.ATTRACT_GAZE,
-    'SpendResource': EffectType.SPEND_RESOURCE,
-    'SpendAvatarResource': EffectType.SPEND_AVATAR_RESOURCE,
-    'KillOthers': EffectType.KILL_OTHERS,
-    'KillIfAvatarWithoutResource': EffectType.KILL_IF_AVATAR_WITHOUT_RESOURCE,
-    'AvatarCollectResource': EffectType.AVATAR_COLLECT_RESOURCE,
-    'TransformOthersTo': EffectType.TRANSFORM_OTHERS_TO,
-}
+
+
 
 # py-vgdl uses Vector2(x, y) with screen coords: UP=(0,-1), DOWN=(0,1)
 # Our JAX format uses (row, col): UP=(-1,0), DOWN=(1,0)
@@ -459,37 +424,36 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
 
 def _build_effect_def(actor, actee, effect_name, kwargs):
     """Convert parsed effect data into an EffectDef."""
-    et = EFFECT_MAP.get(effect_name, EffectType.NULL)
+    et = VGDL_TO_KEY.get(effect_name, 'null')
     score_change = int(kwargs.get('scoreChange', 0))
 
     # Pass through relevant kwargs for each effect type
     eff_kwargs = {}
-    if et == EffectType.TRANSFORM_TO and 'stype' in kwargs:
+    if et == 'transform_to' and 'stype' in kwargs:
         eff_kwargs['stype'] = kwargs['stype']
-    elif et in (EffectType.CHANGE_RESOURCE,):
+    elif et == 'change_resource':
         if 'resource' in kwargs:
             eff_kwargs['resource'] = kwargs['resource']
         if 'value' in kwargs:
             eff_kwargs['value'] = int(kwargs['value'])
-    elif et == EffectType.COLLECT_RESOURCE:
+    elif et == 'collect_resource':
         pass  # resolved at compile time from the Resource SpriteDef
-    elif et in (EffectType.KILL_IF_HAS_LESS, EffectType.KILL_IF_HAS_MORE):
+    elif et in ('kill_if_has_less', 'kill_if_has_more'):
         if 'resource' in kwargs:
             eff_kwargs['resource'] = kwargs['resource']
         if 'limit' in kwargs:
             eff_kwargs['limit'] = int(kwargs['limit'])
-    elif et in (EffectType.KILL_IF_OTHER_HAS_MORE, EffectType.KILL_IF_OTHER_HAS_LESS):
+    elif et in ('kill_if_other_has_more', 'kill_if_other_has_less'):
         if 'resource' in kwargs:
             eff_kwargs['resource'] = kwargs['resource']
         if 'limit' in kwargs:
             eff_kwargs['limit'] = int(kwargs['limit'])
-    elif et == EffectType.TELEPORT_TO_EXIT:
+    elif et == 'teleport_to_exit':
         pass  # resolved at compile time from portal's stype
-    elif et == EffectType.KILL_IF_SLOW:
+    elif et == 'kill_if_slow':
         if 'limitspeed' in kwargs:
             eff_kwargs['limitspeed'] = float(kwargs['limitspeed'])
-    elif et in (EffectType.WALL_STOP, EffectType.WALL_BOUNCE,
-                EffectType.BOUNCE_DIRECTION):
+    elif et in ('wall_stop', 'wall_bounce', 'bounce_direction'):
         if 'friction' in kwargs:
             eff_kwargs['friction'] = float(kwargs['friction'])
 

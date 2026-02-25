@@ -12,11 +12,16 @@ Validation levels (inspired by PuzzleJAX validate_sols.py):
   4: Terminal state (score, done, win)
 """
 import os
+import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from conftest import GAMES_DIR
-BLOCK_SIZE = 10
+from .constants import GAMES_DIR, BLOCK_SIZE
+
+# Ensure py-vgdl is importable (needed by setup_pyvgdl_game)
+_PYVGDL_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'py-vgdl')
+if _PYVGDL_DIR not in sys.path:
+    sys.path.insert(0, _PYVGDL_DIR)
 
 
 @dataclass
@@ -118,7 +123,7 @@ def compare_states(state_a, state_b):
 # ── py-vgdl trajectory runner ────────────────────────────────────────
 
 
-def _setup_pyvgdl_game(game_name):
+def setup_pyvgdl_game(game_name):
     """Set up py-vgdl game without renderer (state extraction only).
 
     Returns:
@@ -163,9 +168,9 @@ def run_pyvgdl_trajectory(game_name, actions, seed=42, rng_replay=None):
     Returns:
         list of normalized state dicts (one per step, including initial state)
     """
-    from state_extractor import extract_pyvgdl_state
+    from .state_extractor import extract_pyvgdl_state
 
-    game, action_keys, sprite_key_order = _setup_pyvgdl_game(game_name)
+    game, action_keys, sprite_key_order = setup_pyvgdl_game(game_name)
     game.set_seed(seed)
 
     if rng_replay is not None:
@@ -194,7 +199,7 @@ def validate_pyvgdl_loads(game_name):
         (success: bool, error_msg: str or None)
     """
     try:
-        game, action_keys, sprite_key_order = _setup_pyvgdl_game(game_name)
+        game, action_keys, sprite_key_order = setup_pyvgdl_game(game_name)
         return True, None
     except Exception as e:
         return False, str(e)
@@ -206,10 +211,10 @@ def validate_pyvgdl_state_extraction(game_name):
     Returns:
         (success: bool, state_or_error)
     """
-    from state_extractor import extract_pyvgdl_state
+    from .state_extractor import extract_pyvgdl_state
 
     try:
-        game, action_keys, sprite_key_order = _setup_pyvgdl_game(game_name)
+        game, action_keys, sprite_key_order = setup_pyvgdl_game(game_name)
         state = extract_pyvgdl_state(game, sprite_key_order, game.block_size)
 
         # Basic sanity checks
@@ -237,7 +242,7 @@ def validate_pyvgdl_trajectory(game_name, n_steps=50, seed=42):
         (success: bool, states_or_error)
     """
     try:
-        game, action_keys, _ = _setup_pyvgdl_game(game_name)
+        game, action_keys, _ = setup_pyvgdl_game(game_name)
         # Find NOOP action index (Action with empty keys tuple)
         noop_idx = next(i for i, a in enumerate(action_keys) if a.keys == ())
         actions = [noop_idx] * n_steps
@@ -259,7 +264,7 @@ def validate_pyvgdl_trajectory(game_name, n_steps=50, seed=42):
 # ── vgdl-jax trajectory runner ─────────────────────────────────────
 
 
-def _setup_jax_game(game_name):
+def setup_jax_game(game_name):
     """Set up vgdl-jax compiled game from the shared game files.
 
     Uses max_sprites_per_type large enough for ALL sprites (including inert
@@ -289,9 +294,9 @@ def run_jax_trajectory(game_name, actions, seed=42):
     Returns list of normalized state dicts (same format as run_pyvgdl_trajectory).
     """
     import jax
-    from state_extractor import extract_jax_state
+    from .state_extractor import extract_jax_state
 
-    compiled, game_def = _setup_jax_game(game_name)
+    compiled, game_def = setup_jax_game(game_name)
     state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
 
     # Initial state
@@ -319,26 +324,26 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
         TrajectoryResult with per-step StepComparison.
     """
     import jax
-    from state_extractor import extract_pyvgdl_state, extract_jax_state
+    from .state_extractor import extract_pyvgdl_state, extract_jax_state
     from vgdl_jax.parser import parse_vgdl
     from vgdl_jax.compiler import compile_game
 
     # ── Set up JAX side ──
-    compiled, game_def = _setup_jax_game(game_name)
+    compiled, game_def = setup_jax_game(game_name)
     jax_state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
 
     # ── Set up py-vgdl side ──
-    game, action_keys, sprite_key_order = _setup_pyvgdl_game(game_name)
+    game, action_keys, sprite_key_order = setup_pyvgdl_game(game_name)
     game.set_seed(seed)
 
     # ── Optional RNG replay ──
     rng_replay = None
     recorder = None
     if use_rng_replay:
-        from rng_replay import RNGRecorder, ReplayRandomGenerator
+        from .rng_replay import RNGRecorder, ReplayRandomGenerator
 
-        sprite_configs = _get_sprite_configs_from_compiled(compiled)
-        effects = _get_effects_from_compiled(compiled)
+        sprite_configs = get_sprite_configs(compiled)
+        effects = get_effects(compiled)
 
         recorder = RNGRecorder(sprite_configs, effects, game_def)
         rng_replay = ReplayRandomGenerator(game_def)
@@ -360,7 +365,7 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
     )]
 
     # ── Step through actions ──
-    sprite_configs = _get_sprite_configs_from_compiled(compiled) if recorder else None
+    sprite_configs = get_sprite_configs(compiled) if recorder else None
 
     for i, action_idx in enumerate(actions):
         pv_done = game.ended
@@ -380,7 +385,7 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
 
         # Patch chaser directions using distance field, then step py-vgdl
         if recorder is not None:
-            from rng_replay import patch_chaser_directions
+            from .rng_replay import patch_chaser_directions
             patch_chaser_directions(record, prev_jax_state, sprite_configs,
                                     game_def.level.height, game_def.level.width)
             rng_replay.set_step_record(record)
@@ -423,7 +428,7 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
 # ── Helpers for extracting configs from compiled game ─────────────────
 
 
-def _get_sprite_configs_from_compiled(compiled):
+def get_sprite_configs(compiled):
     """Extract sprite_configs list from a CompiledGame."""
     from vgdl_jax.data_model import SpriteClass
 
@@ -465,10 +470,8 @@ def _get_sprite_configs_from_compiled(compiled):
     return sprite_configs
 
 
-def _get_effects_from_compiled(compiled):
+def get_effects(compiled):
     """Extract compiled effects list from a CompiledGame."""
-    from vgdl_jax.data_model import EffectType
-
     gd = compiled.game_def
     effects = []
     for ed in gd.effects:
@@ -497,7 +500,7 @@ def _get_effects_from_compiled(compiled):
                         score_change=ed.score_change,
                         kwargs=dict(ed.kwargs),
                     )
-                    if ed.effect_type == EffectType.TELEPORT_TO_EXIT:
+                    if ed.effect_type == 'teleport_to_exit':
                         # Resolve exit type from the actee portal sprite's
                         # portal_exit_stype (not from effect kwargs).
                         portal_sd = gd.sprites[tb_idx]
@@ -510,23 +513,6 @@ def _get_effects_from_compiled(compiled):
     return effects
 
 
-_EFFECT_NAMES = {
-    0: 'kill_sprite', 1: 'kill_both', 2: 'step_back',
-    3: 'transform_to', 4: 'turn_around', 5: 'reverse_direction',
-    6: 'null', 7: 'change_resource', 8: 'collect_resource',
-    9: 'kill_if_has_less', 10: 'kill_if_has_more',
-    11: 'kill_if_other_has_more', 12: 'kill_if_other_has_less',
-    13: 'kill_if_from_above', 14: 'wrap_around', 15: 'bounce_forward',
-    16: 'undo_all', 17: 'teleport_to_exit', 18: 'pull_with_it',
-    19: 'wall_stop', 20: 'wall_bounce', 21: 'bounce_direction',
-    22: 'flip_direction', 23: 'kill_if_alive', 24: 'kill_if_slow',
-    25: 'convey_sprite', 26: 'clone_sprite', 27: 'spawn_if_has_more',
-    28: 'wind_gust', 29: 'slip_forward', 30: 'attract_gaze',
-    31: 'spend_resource', 32: 'spend_avatar_resource', 33: 'kill_others',
-    34: 'kill_if_avatar_without_resource', 35: 'avatar_collect_resource',
-    36: 'transform_others_to',
-}
-
-
 def _effect_type_to_str(et):
-    return _EFFECT_NAMES.get(et, f'unknown_{et}')
+    """Identity — effect_type is already a string key."""
+    return et

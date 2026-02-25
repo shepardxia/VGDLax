@@ -223,7 +223,7 @@ class ReplayRandomGenerator:
     def __init__(self, game_def):
         """
         Args:
-            game_def: GameDef for key→type_idx mapping
+            game_def: GameDef for key->type_idx mapping
         """
         self._key_to_type_idx = {}
         for sd in game_def.sprites:

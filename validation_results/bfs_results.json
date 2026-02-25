@@ -1,8 +1,0 @@
-{
-  "sokoban": {
-    "solved": false,
-    "iterations": 100000,
-    "states_visited": 157241,
-    "time_s": 22.99
-  }
-}

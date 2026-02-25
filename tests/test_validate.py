@@ -7,8 +7,8 @@ import os
 import pytest
 import numpy as np
 
-from conftest import GAMES_DIR, ALL_GAMES
-from validate_harness import (
+from vgdl_jax.validate.constants import GAMES_DIR, ALL_GAMES, DETERMINISTIC_GAMES, STOCHASTIC_GAMES
+from vgdl_jax.validate.harness import (
     validate_pyvgdl_loads,
     validate_pyvgdl_state_extraction,
     validate_pyvgdl_trajectory,
@@ -16,22 +16,14 @@ from validate_harness import (
     run_jax_trajectory,
     run_comparison,
     compare_states,
-    _setup_pyvgdl_game,
-    _setup_jax_game,
-    _get_sprite_configs_from_compiled,
-    _get_effects_from_compiled,
+    setup_pyvgdl_game,
+    setup_jax_game,
+    get_sprite_configs,
+    get_effects,
     BLOCK_SIZE,
 )
-from state_extractor import extract_pyvgdl_state
+from vgdl_jax.validate.state_extractor import extract_pyvgdl_state
 
-# Only sokoban is fully deterministic (no stochastic NPCs)
-DETERMINISTIC_GAMES = ["sokoban"]
-
-# All other games have stochastic NPCs
-STOCHASTIC_GAMES = [
-    "chase", "zelda", "aliens", "missilecommand",
-    "portals", "boulderdash", "survivezombies", "frogs",
-]
 
 # ── Level 0: Game loads ──────────────────────────────────────────────
 
@@ -89,7 +81,7 @@ def test_pyvgdl_trajectory_runs(game):
 @pytest.mark.parametrize("game", ALL_GAMES)
 def test_pyvgdl_trajectory_with_actions(game):
     """Run a trajectory with non-NOOP actions."""
-    game_obj, action_keys, _ = _setup_pyvgdl_game(game)
+    game_obj, action_keys, _ = setup_pyvgdl_game(game)
     n_actions = len(action_keys)
 
     # Cycle through all actions
@@ -110,7 +102,7 @@ def test_pyvgdl_trajectory_with_actions(game):
 @pytest.mark.parametrize("game", DETERMINISTIC_GAMES)
 def test_pyvgdl_deterministic_reproducibility(game):
     """Deterministic games produce identical trajectories with same seed."""
-    game_obj, action_keys, _ = _setup_pyvgdl_game(game)
+    game_obj, action_keys, _ = setup_pyvgdl_game(game)
     n_actions = len(action_keys)
     actions = [i % n_actions for i in range(20)]
 
@@ -135,8 +127,8 @@ def test_pyvgdl_deterministic_reproducibility(game):
 def test_pyvgdl_with_replay_rng(game):
     """Verify ReplayRandomGenerator can be injected and game still runs."""
     import jax
-    from rng_replay import RNGRecorder, ReplayRandomGenerator
-    from state_extractor import extract_pyvgdl_state
+    from vgdl_jax.validate.rng_replay import RNGRecorder, ReplayRandomGenerator
+    from vgdl_jax.validate.state_extractor import extract_pyvgdl_state
     from vgdl_jax.parser import parse_vgdl
     from vgdl_jax.compiler import compile_game
 
@@ -148,14 +140,14 @@ def test_pyvgdl_with_replay_rng(game):
     max_n = compiled.init_state.alive.shape[1]
 
     recorder = RNGRecorder(
-        sprite_configs=_get_sprite_configs_from_compiled(compiled),
-        effects=_get_effects_from_compiled(compiled),
+        sprite_configs=get_sprite_configs(compiled),
+        effects=get_effects(compiled),
         game_def=gd,
     )
     replay_rng = ReplayRandomGenerator(gd)
 
     # Set up py-vgdl
-    game_obj, action_keys, sprite_key_order = _setup_pyvgdl_game(game)
+    game_obj, action_keys, sprite_key_order = setup_pyvgdl_game(game)
     game_obj.set_seed(42)
     game_obj.set_random_generator(replay_rng)
 
@@ -182,7 +174,7 @@ def test_pyvgdl_with_replay_rng(game):
 def test_rng_recorder_produces_valid_records():
     """Verify RNGRecorder output has correct structure and value ranges."""
     import jax
-    from rng_replay import RNGRecorder
+    from vgdl_jax.validate.rng_replay import RNGRecorder
     from vgdl_jax.parser import parse_vgdl
     from vgdl_jax.compiler import compile_game
     from vgdl_jax.data_model import SpriteClass
@@ -194,8 +186,8 @@ def test_rng_recorder_produces_valid_records():
     compiled = compile_game(gd)
     max_n = compiled.init_state.alive.shape[1]
 
-    sprite_configs = _get_sprite_configs_from_compiled(compiled)
-    effects = _get_effects_from_compiled(compiled)
+    sprite_configs = get_sprite_configs(compiled)
+    effects = get_effects(compiled)
 
     recorder = RNGRecorder(sprite_configs, effects, gd)
     rng_key = jax.random.PRNGKey(0)
@@ -243,7 +235,7 @@ def test_cross_engine_initial_state(game):
 @pytest.mark.parametrize("game", DETERMINISTIC_GAMES)
 def test_cross_engine_deterministic(game):
     """Deterministic games must match exactly for 30 steps."""
-    compiled, _ = _setup_jax_game(game)
+    compiled, _ = setup_jax_game(game)
     noop_idx = compiled.noop_action
 
     # Cycle through all actions for broader coverage
@@ -262,7 +254,7 @@ def test_cross_engine_deterministic(game):
 @pytest.mark.parametrize("game", STOCHASTIC_GAMES)
 def test_cross_engine_with_rng_replay(game):
     """Stochastic games with RNG replay — strict comparison, no relaxation."""
-    compiled, _ = _setup_jax_game(game)
+    compiled, _ = setup_jax_game(game)
 
     # Use NOOP to isolate NPC behavior
     noop_idx = compiled.noop_action
@@ -286,7 +278,7 @@ def test_cross_engine_with_rng_replay(game):
 @pytest.mark.parametrize("game", ALL_GAMES)
 def test_jax_trajectory_runs(game):
     """vgdl-jax runs a 30-step trajectory without error."""
-    compiled, _ = _setup_jax_game(game)
+    compiled, _ = setup_jax_game(game)
     noop_idx = compiled.noop_action
     actions = [noop_idx] * 30
 
@@ -302,7 +294,7 @@ def test_jax_trajectory_runs(game):
 @pytest.mark.parametrize("game", DETERMINISTIC_GAMES)
 def test_jax_deterministic_reproducibility(game):
     """Deterministic games produce identical JAX trajectories with same seed."""
-    compiled, _ = _setup_jax_game(game)
+    compiled, _ = setup_jax_game(game)
     actions = [i % compiled.n_actions for i in range(20)]
 
     states_a = run_jax_trajectory(game, actions, seed=42)

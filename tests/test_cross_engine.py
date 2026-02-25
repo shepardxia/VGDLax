@@ -35,9 +35,7 @@ except ImportError:
 from vgdl_jax.parser import parse_vgdl
 from vgdl_jax.compiler import compile_game
 from vgdl_jax.render import render_pygame
-
-from conftest import GAMES_DIR
-BLOCK_SIZE = 10
+from vgdl_jax.validate.constants import GAMES_DIR, BLOCK_SIZE
 SKIP_MSG = "requires pygame and py-vgdl"
 
 

@@ -3,6 +3,7 @@ Compiler: converts a GameDef (parsed VGDL) into a jit-compiled step function
 and an initial GameState.
 """
 import math
+import warnings
 from dataclasses import dataclass
 from collections import defaultdict
 from typing import Callable
@@ -11,7 +12,7 @@ import jax
 import jax.numpy as jnp
 
 from vgdl_jax.data_model import (
-    GameDef, SpriteClass, EffectType, TerminationType,
+    GameDef, SpriteClass, TerminationType, PHYSICS_SCALE,
 )
 from vgdl_jax.state import GameState, create_initial_state
 from vgdl_jax.step import build_step_fn
@@ -49,10 +50,12 @@ AVATAR_INFO = {
 # Avatars whose action indices start at LEFT/RIGHT instead of UP/DOWN
 _HORIZONTAL_AVATARS = {SpriteClass.HORIZONTAL_AVATAR, SpriteClass.FLAK_AVATAR}
 
-# py-vgdl physics operates in pixel coordinates where 1 grid cell = block_size pixels.
-# vgdl-jax positions are in grid-cell units. All physics constants (forces, velocities)
-# from VGDL files are in pixel units and must be divided by this scale factor.
-PHYSICS_SCALE = 24
+def _resolve_first(game_def, stype, default=None):
+    """Resolve stype to list of indices, return first or default."""
+    if stype is None:
+        return default
+    indices = game_def.resolve_stype(stype)
+    return indices[0] if indices else default
 
 
 def compile_game(game_def: GameDef, max_sprites_per_type=None):
@@ -163,10 +166,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     shoot_action_idx = -1
 
     if can_shoot and avatar_sd.spawner_stype:
-        proj_key = avatar_sd.spawner_stype
-        proj_indices = game_def.resolve_stype(proj_key)
-        if proj_indices:
-            proj_type_idx = proj_indices[0]
+        proj_type_idx = _resolve_first(game_def, avatar_sd.spawner_stype, -1)
+        if proj_type_idx >= 0:
             proj_sd = game_def.sprites[proj_type_idx]
             proj_speed = proj_sd.speed
             if avatar_sd.sprite_class == SpriteClass.SHOOT_AVATAR:
@@ -221,9 +222,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         )
 
         if sd.sprite_class in (SpriteClass.CHASER, SpriteClass.FLEEING):
-            target_key = sd.spawner_stype
-            target_indices = game_def.resolve_stype(target_key) if target_key else []
-            cfg['target_type_idx'] = target_indices[0] if target_indices else 0
+            cfg['target_type_idx'] = _resolve_first(game_def, sd.spawner_stype, 0)
 
         elif sd.sprite_class == SpriteClass.SPREADER:
             cfg['spreadprob'] = sd.spawner_prob  # prob param doubles as spreadprob
@@ -242,13 +241,12 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             cfg['gravity'] = 1.0 / PHYSICS_SCALE
 
         elif sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
-            target_key = sd.spawner_stype
-            target_indices = game_def.resolve_stype(target_key) if target_key else []
-            cfg['target_type_idx'] = target_indices[0] if target_indices else 0
+            target_idx = _resolve_first(game_def, sd.spawner_stype, -1)
+            cfg['target_type_idx'] = target_idx if target_idx >= 0 else 0
             cfg['prob'] = sd.spawner_prob
             cfg['total'] = sd.spawner_total
-            if target_indices:
-                target_sd = game_def.sprites[target_indices[0]]
+            if target_idx >= 0:
+                target_sd = game_def.sprites[target_idx]
                 cfg['target_orientation'] = list(target_sd.orientation)
                 cfg['target_speed'] = target_sd.speed
             else:
@@ -277,7 +275,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                 compiled_effects.append(dict(
                     type_a=ta_idx,
                     is_eos=True,
-                    effect_type=_effect_type_str(ed.effect_type),
+                    effect_type=ed.effect_type,
                     score_change=ed.score_change,
                     kwargs=_compile_effect_kwargs(
                         ed, game_def, resource_name_to_idx, resource_limits,
@@ -294,7 +292,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                         type_a=ta_idx,
                         type_b=tb_idx,
                         is_eos=False,
-                        effect_type=_effect_type_str(ed.effect_type),
+                        effect_type=ed.effect_type,
                         score_change=ed.score_change,
                         use_aabb=(ta_idx in continuous_types or
                                   tb_idx in continuous_types or
@@ -345,6 +343,19 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                 check_timeout(s, _lim, _win)
             compiled_terminations.append((check_fn, td.score_change))
 
+    # ── 5b. Compile-time validation ─────────────────────────────────────
+    if can_shoot and proj_type_idx < 0:
+        warnings.warn(f"Avatar can_shoot=True but projectile type not resolved "
+                       f"(spawner_stype={avatar_sd.spawner_stype!r})")
+    for cfg in sprite_configs:
+        sc = cfg['sprite_class']
+        if sc in (SpriteClass.CHASER, SpriteClass.FLEEING):
+            if cfg.get('target_type_idx', 0) == 0 and not game_def.sprites[0].sprite_class in AVATAR_INFO:
+                warnings.warn(f"Chaser/Fleeing target defaulted to type 0")
+        if sc in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
+            if cfg.get('target_type_idx', 0) == 0:
+                warnings.warn(f"SpawnPoint/Bomber target defaulted to type 0")
+
     # ── 6. Build step function ─────────────────────────────────────────
     params = dict(n_types=n_types, max_n=max_n, height=height, width=width,
                   n_resource_types=max(n_resource_types, 1),
@@ -362,49 +373,6 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         game_def=game_def,
     )
 
-
-def _effect_type_str(effect_type_int):
-    """Map EffectType enum int to the string expected by step.py."""
-    mapping = {
-        EffectType.KILL_SPRITE: 'kill_sprite',
-        EffectType.KILL_BOTH: 'kill_both',
-        EffectType.STEP_BACK: 'step_back',
-        EffectType.TRANSFORM_TO: 'transform_to',
-        EffectType.TURN_AROUND: 'turn_around',
-        EffectType.REVERSE_DIRECTION: 'reverse_direction',
-        EffectType.NULL: 'null',
-        EffectType.CHANGE_RESOURCE: 'change_resource',
-        EffectType.COLLECT_RESOURCE: 'collect_resource',
-        EffectType.KILL_IF_HAS_LESS: 'kill_if_has_less',
-        EffectType.KILL_IF_HAS_MORE: 'kill_if_has_more',
-        EffectType.KILL_IF_OTHER_HAS_MORE: 'kill_if_other_has_more',
-        EffectType.KILL_IF_OTHER_HAS_LESS: 'kill_if_other_has_less',
-        EffectType.KILL_IF_FROM_ABOVE: 'kill_if_from_above',
-        EffectType.WRAP_AROUND: 'wrap_around',
-        EffectType.BOUNCE_FORWARD: 'bounce_forward',
-        EffectType.UNDO_ALL: 'undo_all',
-        EffectType.TELEPORT_TO_EXIT: 'teleport_to_exit',
-        EffectType.PULL_WITH_IT: 'pull_with_it',
-        EffectType.WALL_STOP: 'wall_stop',
-        EffectType.WALL_BOUNCE: 'wall_bounce',
-        EffectType.BOUNCE_DIRECTION: 'bounce_direction',
-        EffectType.FLIP_DIRECTION: 'flip_direction',
-        EffectType.KILL_IF_ALIVE: 'kill_if_alive',
-        EffectType.KILL_IF_SLOW: 'kill_if_slow',
-        EffectType.CONVEY_SPRITE: 'convey_sprite',
-        EffectType.CLONE_SPRITE: 'clone_sprite',
-        EffectType.SPAWN_IF_HAS_MORE: 'spawn_if_has_more',
-        EffectType.WIND_GUST: 'wind_gust',
-        EffectType.SLIP_FORWARD: 'slip_forward',
-        EffectType.ATTRACT_GAZE: 'attract_gaze',
-        EffectType.SPEND_RESOURCE: 'spend_resource',
-        EffectType.SPEND_AVATAR_RESOURCE: 'spend_avatar_resource',
-        EffectType.KILL_OTHERS: 'kill_others',
-        EffectType.KILL_IF_AVATAR_WITHOUT_RESOURCE: 'kill_if_avatar_without_resource',
-        EffectType.AVATAR_COLLECT_RESOURCE: 'avatar_collect_resource',
-        EffectType.TRANSFORM_OTHERS_TO: 'transform_others_to',
-    }
-    return mapping.get(effect_type_int, 'null')
 
 
 def _resolve_collect_resource_kwargs(ed, game_def, concrete_actor_idx,
@@ -428,109 +396,101 @@ def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
                            concrete_actor_idx=None, concrete_actee_idx=None,
                            avatar_type_idx=None):
     """Compile effect kwargs, resolving stype references to type indices."""
+    et = ed.effect_type  # string key (e.g. 'kill_sprite')
     kwargs = {}
-    if ed.effect_type == EffectType.TRANSFORM_TO:
-        stype = ed.kwargs.get('stype', '')
-        indices = game_def.resolve_stype(stype)
-        if indices:
-            kwargs['new_type_idx'] = indices[0]
+    if et == 'transform_to':
+        idx = _resolve_first(game_def, ed.kwargs.get('stype', ''))
+        if idx is not None:
+            kwargs['new_type_idx'] = idx
 
-    elif ed.effect_type == EffectType.CHANGE_RESOURCE:
+    elif et == 'change_resource':
         res_name = ed.kwargs.get('resource', '')
         kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
         kwargs['value'] = ed.kwargs.get('value', 0)
         kwargs['limit'] = resource_limits[kwargs['resource_idx']] if resource_limits else 100
 
-    elif ed.effect_type == EffectType.COLLECT_RESOURCE:
+    elif et == 'collect_resource':
         kwargs.update(_resolve_collect_resource_kwargs(
             ed, game_def, concrete_actor_idx, resource_name_to_idx, resource_limits))
 
-    elif ed.effect_type in (EffectType.KILL_IF_HAS_LESS, EffectType.KILL_IF_HAS_MORE,
-                             EffectType.KILL_IF_OTHER_HAS_MORE,
-                             EffectType.KILL_IF_OTHER_HAS_LESS):
+    elif et in ('kill_if_has_less', 'kill_if_has_more',
+                'kill_if_other_has_more', 'kill_if_other_has_less'):
         res_name = ed.kwargs.get('resource', '')
         kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
         kwargs['limit'] = ed.kwargs.get('limit', 0)
 
-    elif ed.effect_type == EffectType.KILL_IF_SLOW:
+    elif et == 'kill_if_slow':
         kwargs['limitspeed'] = ed.kwargs.get('limitspeed', 0.0)
 
-    elif ed.effect_type == EffectType.CONVEY_SPRITE:
-        # Strength from the partner (actee/type_b) SpriteDef
+    elif et == 'convey_sprite':
         if concrete_actee_idx is not None:
             partner_sd = game_def.sprites[concrete_actee_idx]
             kwargs['strength'] = partner_sd.strength
         else:
             kwargs['strength'] = 1.0
 
-    elif ed.effect_type == EffectType.SPAWN_IF_HAS_MORE:
+    elif et == 'spawn_if_has_more':
         res_name = ed.kwargs.get('resource', '')
         kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
         kwargs['limit'] = ed.kwargs.get('limit', 0)
-        stype = ed.kwargs.get('stype', '')
-        indices = game_def.resolve_stype(stype)
-        if indices:
-            kwargs['spawn_type_idx'] = indices[0]
+        idx = _resolve_first(game_def, ed.kwargs.get('stype', ''))
+        if idx is not None:
+            kwargs['spawn_type_idx'] = idx
 
-    elif ed.effect_type == EffectType.SLIP_FORWARD:
+    elif et == 'slip_forward':
         kwargs['prob'] = float(ed.kwargs.get('prob', 0.5))
 
-    elif ed.effect_type == EffectType.ATTRACT_GAZE:
+    elif et == 'attract_gaze':
         kwargs['prob'] = float(ed.kwargs.get('prob', 0.5))
 
-    elif ed.effect_type == EffectType.SPEND_RESOURCE:
+    elif et == 'spend_resource':
         res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
         kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
         kwargs['amount'] = int(ed.kwargs.get('amount', 1))
 
-    elif ed.effect_type == EffectType.SPEND_AVATAR_RESOURCE:
+    elif et == 'spend_avatar_resource':
         res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
         kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
         kwargs['amount'] = int(ed.kwargs.get('amount', 1))
         kwargs['avatar_type_idx'] = avatar_type_idx
 
-    elif ed.effect_type == EffectType.KILL_OTHERS:
-        stype = ed.kwargs.get('stype', ed.kwargs.get('target', ''))
-        indices = game_def.resolve_stype(stype)
-        if indices:
-            kwargs['kill_type_idx'] = indices[0]
+    elif et == 'kill_others':
+        idx = _resolve_first(game_def, ed.kwargs.get('stype', ed.kwargs.get('target', '')))
+        if idx is not None:
+            kwargs['kill_type_idx'] = idx
 
-    elif ed.effect_type == EffectType.KILL_IF_AVATAR_WITHOUT_RESOURCE:
+    elif et == 'kill_if_avatar_without_resource':
         res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
         kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
         kwargs['avatar_type_idx'] = avatar_type_idx
 
-    elif ed.effect_type == EffectType.AVATAR_COLLECT_RESOURCE:
+    elif et == 'avatar_collect_resource':
         kwargs.update(_resolve_collect_resource_kwargs(
             ed, game_def, concrete_actor_idx, resource_name_to_idx, resource_limits))
         kwargs['avatar_type_idx'] = avatar_type_idx
 
-    elif ed.effect_type == EffectType.TRANSFORM_OTHERS_TO:
-        target_stype = ed.kwargs.get('target', '')
-        target_indices = game_def.resolve_stype(target_stype)
-        if target_indices:
-            kwargs['target_type_idx'] = target_indices[0]
-        new_stype = ed.kwargs.get('stype', '')
-        new_indices = game_def.resolve_stype(new_stype)
-        if new_indices:
-            kwargs['new_type_idx'] = new_indices[0]
+    elif et == 'transform_others_to':
+        idx = _resolve_first(game_def, ed.kwargs.get('target', ''))
+        if idx is not None:
+            kwargs['target_type_idx'] = idx
+        idx = _resolve_first(game_def, ed.kwargs.get('stype', ''))
+        if idx is not None:
+            kwargs['new_type_idx'] = idx
 
-    elif ed.effect_type in (EffectType.WALL_STOP, EffectType.WALL_BOUNCE,
-                             EffectType.BOUNCE_DIRECTION):
+    elif et in ('wall_stop', 'wall_bounce', 'bounce_direction'):
         if 'friction' in ed.kwargs:
             kwargs['friction'] = float(ed.kwargs['friction'])
 
-    elif ed.effect_type == EffectType.TELEPORT_TO_EXIT:
-        # Resolve exit type from the concrete portal's stype
+    elif et == 'teleport_to_exit':
         if concrete_actee_idx is not None:
             portal_sd = game_def.sprites[concrete_actee_idx]
         else:
-            actee_indices = game_def.resolve_stype(ed.actee_stype)
-            portal_sd = game_def.sprites[actee_indices[0]] if actee_indices else None
+            actee_idx = _resolve_first(game_def, ed.actee_stype)
+            portal_sd = game_def.sprites[actee_idx] if actee_idx is not None else None
         if portal_sd is not None and portal_sd.portal_exit_stype:
-            exit_indices = game_def.resolve_stype(portal_sd.portal_exit_stype)
-            if exit_indices:
-                kwargs['exit_type_idx'] = exit_indices[0]
+            exit_idx = _resolve_first(game_def, portal_sd.portal_exit_stype)
+            if exit_idx is not None:
+                kwargs['exit_type_idx'] = exit_idx
 
     return kwargs
 

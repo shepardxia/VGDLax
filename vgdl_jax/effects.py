@@ -270,28 +270,26 @@ def spend_avatar_resource(state, mask, score_delta, kwargs, **_):
     )
 
 
-def kill_if_has_less(state, type_a, mask, score_change, kwargs, **_):
-    """Kill type_a if its resource <= limit (py-vgdl uses <=, not <)."""
+def _kill_if_resource(state, type_a, mask, score_change, kwargs, compare_fn):
+    """Kill type_a sprites where compare_fn(resource, limit) is true."""
     r_idx = kwargs.get('resource_idx', 0)
     limit = kwargs.get('limit', 0)
     cur = state.resources[type_a, :, r_idx]
-    should_kill = mask & (cur <= limit)
+    should_kill = mask & compare_fn(cur, limit)
     return state.replace(
         alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
         score=state.score + should_kill.sum() * jnp.int32(score_change),
     )
+
+
+def kill_if_has_less(state, type_a, mask, score_change, kwargs, **_):
+    """Kill type_a if its resource <= limit."""
+    return _kill_if_resource(state, type_a, mask, score_change, kwargs, jnp.less_equal)
 
 
 def kill_if_has_more(state, type_a, mask, score_change, kwargs, **_):
-    """Kill type_a if its resource >= limit (py-vgdl uses >=, not >)."""
-    r_idx = kwargs.get('resource_idx', 0)
-    limit = kwargs.get('limit', 0)
-    cur = state.resources[type_a, :, r_idx]
-    should_kill = mask & (cur >= limit)
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
-        score=state.score + should_kill.sum() * jnp.int32(score_change),
-    )
+    """Kill type_a if its resource >= limit."""
+    return _kill_if_resource(state, type_a, mask, score_change, kwargs, jnp.greater_equal)
 
 
 def kill_if_other_has_more(state, type_a, type_b, mask, score_change,
@@ -356,40 +354,36 @@ def kill_if_avatar_without_resource(state, type_a, mask, score_change, kwargs, *
 # ── Spawn and transform ───────────────────────────────────────────────
 
 
+def _fill_slots(state, target_type, source_mask, src_positions, src_orientations):
+    """Allocate dead slots in target_type and fill with source data."""
+    should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], source_mask)
+    src_pos = src_positions[src_idx]
+    src_ori = src_orientations[src_idx]
+    return state.replace(
+        alive=state.alive.at[target_type].set(state.alive[target_type] | should_fill),
+        positions=state.positions.at[target_type].set(
+            jnp.where(should_fill[:, None], src_pos, state.positions[target_type])),
+        orientations=state.orientations.at[target_type].set(
+            jnp.where(should_fill[:, None], src_ori, state.orientations[target_type])),
+        ages=state.ages.at[target_type].set(
+            jnp.where(should_fill, 0, state.ages[target_type])),
+    )
+
+
 def transform_to(state, prev_positions, type_a, mask, score_delta, kwargs, **_):
     new_type = kwargs['new_type_idx']
     state = state.replace(
         alive=state.alive.at[type_a].set(state.alive[type_a] & ~mask),
         score=state.score + score_delta,
     )
-    should_fill, src_idx = prefix_sum_allocate(state.alive[new_type], mask)
-    src_pos = prev_positions[type_a][src_idx]
-    src_ori = state.orientations[type_a][src_idx]
-    return state.replace(
-        alive=state.alive.at[new_type].set(state.alive[new_type] | should_fill),
-        positions=state.positions.at[new_type].set(
-            jnp.where(should_fill[:, None], src_pos, state.positions[new_type])),
-        orientations=state.orientations.at[new_type].set(
-            jnp.where(should_fill[:, None], src_ori, state.orientations[new_type])),
-        ages=state.ages.at[new_type].set(
-            jnp.where(should_fill, 0, state.ages[new_type])),
-    )
+    return _fill_slots(state, new_type, mask,
+                        prev_positions[type_a], state.orientations[type_a])
 
 
 def clone_sprite(state, type_a, mask, score_delta, **_):
-    should_fill, src_idx = prefix_sum_allocate(state.alive[type_a], mask)
-    src_pos = state.positions[type_a][src_idx]
-    src_ori = state.orientations[type_a][src_idx]
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] | should_fill),
-        positions=state.positions.at[type_a].set(
-            jnp.where(should_fill[:, None], src_pos, state.positions[type_a])),
-        orientations=state.orientations.at[type_a].set(
-            jnp.where(should_fill[:, None], src_ori, state.orientations[type_a])),
-        ages=state.ages.at[type_a].set(
-            jnp.where(should_fill, 0, state.ages[type_a])),
-        score=state.score + score_delta,
-    )
+    state = _fill_slots(state, type_a, mask,
+                         state.positions[type_a], state.orientations[type_a])
+    return state.replace(score=state.score + score_delta)
 
 
 def spawn_if_has_more(state, type_a, mask, score_delta, kwargs, **_):
@@ -722,56 +716,70 @@ def null(state, score_delta, **_):
 # ── Dispatch ───────────────────────────────────────────────────────────
 
 
-EFFECT_DISPATCH = {
+# Single source of truth: VGDL name → (handler_fn, internal_key)
+EFFECT_REGISTRY = {
     # Kill / removal
-    'kill_sprite':      kill_sprite,
-    'kill_both':        kill_both,
-    'kill_if_alive':    kill_if_alive,
-    'kill_if_slow':     kill_if_slow,
-    'kill_others':      kill_others,
-    'kill_if_from_above': kill_if_from_above,
+    'killSprite':     (kill_sprite,     'kill_sprite'),
+    'killBoth':       (kill_both,       'kill_both'),
+    'killIfAlive':    (kill_if_alive,   'kill_if_alive'),
+    'killIfSlow':     (kill_if_slow,    'kill_if_slow'),
+    'KillOthers':     (kill_others,     'kill_others'),
+    'killIfFromAbove': (kill_if_from_above, 'kill_if_from_above'),
     # Position and orientation
-    'step_back':          step_back,
-    'reverse_direction':  reverse_direction,
-    'turn_around':        turn_around,
-    'flip_direction':     flip_direction,
-    'undo_all':           undo_all,
-    'wrap_around':        wrap_around,
-    'attract_gaze':       attract_gaze,
+    'stepBack':          (step_back,          'step_back'),
+    'reverseDirection':  (reverse_direction,  'reverse_direction'),
+    'turnAround':        (turn_around,        'turn_around'),
+    'flipDirection':     (flip_direction,     'flip_direction'),
+    'undoAll':           (undo_all,           'undo_all'),
+    'wrapAround':        (wrap_around,        'wrap_around'),
+    'attractGaze':       (attract_gaze,       'attract_gaze'),
     # Resources
-    'change_resource':       change_resource,
-    'collect_resource':      collect_resource,
-    'avatar_collect_resource': avatar_collect_resource,
-    'spend_resource':        spend_resource,
-    'spend_avatar_resource': spend_avatar_resource,
-    'kill_if_has_less':      kill_if_has_less,
-    'kill_if_has_more':      kill_if_has_more,
-    'kill_if_other_has_more':  kill_if_other_has_more,
-    'kill_if_other_has_less':  kill_if_other_has_less,
-    'kill_if_avatar_without_resource': kill_if_avatar_without_resource,
+    'changeResource':       (change_resource,       'change_resource'),
+    'collectResource':      (collect_resource,      'collect_resource'),
+    'AvatarCollectResource': (avatar_collect_resource, 'avatar_collect_resource'),
+    'SpendResource':        (spend_resource,        'spend_resource'),
+    'SpendAvatarResource':  (spend_avatar_resource, 'spend_avatar_resource'),
+    'killIfHasLess':        (kill_if_has_less,      'kill_if_has_less'),
+    'killIfHasMore':        (kill_if_has_more,      'kill_if_has_more'),
+    'killIfOtherHasMore':   (kill_if_other_has_more,  'kill_if_other_has_more'),
+    'killIfOtherHasLess':   (kill_if_other_has_less,  'kill_if_other_has_less'),
+    'KillIfAvatarWithoutResource': (kill_if_avatar_without_resource, 'kill_if_avatar_without_resource'),
     # Spawn and transform
-    'transform_to':       transform_to,
-    'clone_sprite':       clone_sprite,
-    'spawn_if_has_more':  spawn_if_has_more,
-    'transform_others_to': transform_others_to,
+    'transformTo':       (transform_to,       'transform_to'),
+    'cloneSprite':       (clone_sprite,       'clone_sprite'),
+    'spawnIfHasMore':    (spawn_if_has_more,  'spawn_if_has_more'),
+    'TransformOthersTo': (transform_others_to, 'transform_others_to'),
     # Movement and conveying
-    'teleport_to_exit':   teleport_to_exit,
-    'convey_sprite':      convey_sprite,
-    'wind_gust':          wind_gust,
-    'slip_forward':       slip_forward,
+    'teleportToExit':   (teleport_to_exit,   'teleport_to_exit'),
+    'conveySprite':     (convey_sprite,      'convey_sprite'),
+    'windGust':         (wind_gust,          'wind_gust'),
+    'slipForward':      (slip_forward,       'slip_forward'),
     # Physics / wall interactions
-    'bounce_forward':     partner_delta,
-    'pull_with_it':       partner_delta,
-    'wall_stop':          wall_stop,
-    'wall_bounce':        wall_bounce,
-    'bounce_direction':   bounce_direction,
+    'bounceForward':    (partner_delta,      'bounce_forward'),
+    'pullWithIt':       (partner_delta,      'pull_with_it'),
+    'wallStop':         (wall_stop,          'wall_stop'),
+    'wallBounce':       (wall_bounce,        'wall_bounce'),
+    'bounceDirection':  (bounce_direction,   'bounce_direction'),
 }
+
+# Derived mappings
+EFFECT_DISPATCH = {v[1]: v[0] for v in EFFECT_REGISTRY.values()}
+VGDL_TO_KEY = {k: v[1] for k, v in EFFECT_REGISTRY.items()}
 
 
 def apply_masked_effect(state, prev_positions, type_a, type_b, mask,
                         effect_type, score_change, kwargs,
                         height, width, max_n):
-    """Apply a single effect to all type_a sprites indicated by mask [max_n]."""
+    """Apply a single effect to all type_a sprites indicated by mask [max_n].
+
+    Both score_delta and score_change are passed to handlers:
+      - score_delta = mask.sum() * score_change — pre-computed total for effects
+        that apply to ALL colliding sprites (e.g. kill_sprite, step_back).
+      - score_change — raw per-sprite value for handlers that conditionally kill a
+        SUBSET of colliders (kill_if_slow, kill_if_from_above, kill_if_has_less/more,
+        kill_if_other_has_more/less, kill_if_avatar_without_resource). These compute
+        their own total from the narrowed mask.
+    """
     n_affected = mask.sum()
     score_delta = n_affected * jnp.int32(score_change)
     handler = EFFECT_DISPATCH.get(effect_type, null)

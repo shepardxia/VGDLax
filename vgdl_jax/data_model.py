@@ -1,6 +1,11 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
+# py-vgdl physics operates in pixel coordinates where 1 grid cell = block_size pixels.
+# vgdl-jax positions are in grid-cell units. All physics constants (forces, velocities)
+# from VGDL files are in pixel units and must be divided by this scale factor.
+PHYSICS_SCALE = 24
+
 
 class SpriteClass:
     IMMOVABLE = 0
@@ -144,7 +149,7 @@ class SpriteDef:
 
 @dataclass
 class EffectDef:
-    effect_type: int
+    effect_type: str   # internal key (e.g. 'kill_sprite'), see effects.EFFECT_REGISTRY
     actor_stype: str
     actee_stype: str
     score_change: int = 0
