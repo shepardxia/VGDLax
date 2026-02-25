@@ -5,14 +5,6 @@ Extracts a normalized state dict that can be compared against vgdl-jax.
 Handles coordinate conversion (py-vgdl pixel coords → grid row,col)
 and sorts positions for order-independent comparison.
 """
-import os
-import sys
-
-PYVGDL_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl')
-if PYVGDL_DIR not in sys.path:
-    sys.path.insert(0, PYVGDL_DIR)
-
-
 def extract_pyvgdl_state(game, sprite_key_order, block_size=10):
     """Extract state from a py-vgdl BasicGameLevel into a normalized dict.
 
@@ -89,7 +81,6 @@ def extract_jax_state(state, game_def):
     Returns:
         Same dict format as extract_pyvgdl_state.
     """
-    import jax.numpy as jnp
     types = {}
 
     for sd in game_def.sprites:

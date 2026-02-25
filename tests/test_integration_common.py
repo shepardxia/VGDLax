@@ -2,11 +2,7 @@
 import jax
 import jax.numpy as jnp
 import pytest
-from conftest import make_env
-
-
-ALL_GAMES = ['chase', 'zelda', 'aliens', 'sokoban', 'portals',
-             'boulderdash', 'survivezombies', 'frogs']
+from conftest import make_env, ALL_GAMES
 
 # Max random-play steps before asserting game ends (per game)
 GAME_END_MAX_STEPS = {

@@ -8,14 +8,14 @@ VGDLax ports [py-vgdl](https://github.com/schaul/py-vgdl) to JAX, replacing OOP 
 
 - **9 supported games**: Chase, Zelda, Aliens, MissileCommand, Sokoban, Portals, BoulderDash, SurviveZombies, Frogs
 - **3 physics modes**: GridPhysics, ContinuousPhysics (InertialAvatar), GravityPhysics (MarioAvatar)
-- **22 effects**: killSprite, stepBack, transformTo, wallStop, wallBounce, bounceDirection, teleportToExit, and more
+- **37 effects**: killSprite, stepBack, transformTo, wallStop, wallBounce, bounceDirection, teleportToExit, and more
 - **gymnax-style API**: `reset(rng) -> (obs, state)`, `step(state, action) -> (obs, state, reward, done, info)`
 - **No pygame dependency**: standalone parser and renderer
 
 ## Installation
 
 ```bash
-pip install -e '.[dev]'
+uv pip install -e '.[dev]'
 ```
 
 Requires Python 3.9+ and JAX.
@@ -60,7 +60,7 @@ Only the step function runs in JAX. The parser and compiler are standard Python 
 - Sprites stored as entity arrays `[n_types, max_n, ...]` with alive masks
 - Collision: grid-based occupancy `O(max_n)` for grid physics, per-pair AABB for continuous physics
 - Effects: boolean masks over sprite arrays (no Python loops at runtime)
-- Speed > 1 converted to cooldown at compile time (no tunneling)
+- Speed as movement multiplier: `delta * speed` per tick, with sweep collision for speed > 1
 
 ## Testing
 
@@ -75,7 +75,7 @@ python -m pytest tests/ --ignore=tests/test_validate.py
 python benchmarks/throughput.py
 ```
 
-227 passing tests covering parsing, compilation, collision, effects, terminations, and per-game integration.
+241 tests covering parsing, compilation, collision, effects, terminations, per-game integration, and cross-engine validation.
 
 ## Throughput
 
@@ -89,13 +89,14 @@ Steps/second on CPU (Apple M1, 256 parallel environments):
 | Portals | ~31K |
 | Frogs | ~27K |
 | SurviveZombies | ~19K |
+| MissileCommand | ~16K |
 | Chase | ~15K |
 | BoulderDash | ~15K |
 
 ## Documentation
 
 - [`tests/MECHANICS_DIFF.md`](tests/MECHANICS_DIFF.md) — Known behavioral differences vs py-vgdl (A1–A9)
-- [`tests/FEATURE_PARITY.md`](tests/FEATURE_PARITY.md) — Missing features and priority ranking
+- [`tests/FEATURE_PARITY.md`](tests/FEATURE_PARITY.md) — Feature coverage and cross-engine validation results
 
 ## VGDL Game Format
 

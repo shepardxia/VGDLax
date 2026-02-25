@@ -3,8 +3,6 @@ Standalone VGDL text parser — no py-vgdl/pygame dependency.
 Reads .txt game files and level files, produces a GameDef.
 """
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Any
-
 from vgdl_jax.data_model import (
     SpriteClass, EffectType, TerminationType,
     SpriteDef, EffectDef, TerminationDef, LevelDef, GameDef,
@@ -228,7 +226,7 @@ def _parse_args(s):
     class_name = None
     kwargs = {}
     start = 0
-    if parts and '=' not in parts[0]:
+    if '=' not in parts[0]:
         class_name = parts[0]
         start = 1
     for part in parts[start:]:
@@ -243,7 +241,7 @@ def _parse_args(s):
 def _parse_sprites(nodes, parent_class=None, parent_args=None, parent_types=None):
     """
     Recursively parse SpriteSet nodes.
-    Returns list of (key, class_name, args, stypes, is_leaf) tuples.
+    Returns list of (key, class_name, args, stypes) tuples.
     """
     if parent_args is None:
         parent_args = {}

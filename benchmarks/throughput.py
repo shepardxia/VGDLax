@@ -5,7 +5,6 @@ Tests vmap over N parallel environments, measures steps/second.
 import time
 import os
 import jax
-import jax.numpy as jnp
 from vgdl_jax.env import VGDLJaxEnv
 
 GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')

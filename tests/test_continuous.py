@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from conftest import ALL_GAMES, GAMES_DIR
 from vgdl_jax.parser import parse_vgdl_text
 from vgdl_jax.compiler import compile_game
 
@@ -245,20 +246,13 @@ class TestInertialActions:
 
 # ── Grid regression tests ────────────────────────────────────────────────
 
-GRID_GAMES = [
-    'chase', 'zelda', 'aliens', 'missilecommand',
-    'sokoban', 'portals', 'boulderdash', 'survivezombies', 'frogs',
-]
-
-
-@pytest.fixture(params=GRID_GAMES)
+@pytest.fixture(params=ALL_GAMES)
 def grid_game_env(request):
     """Load a grid-based game and run 10 random steps to verify no crashes."""
     import os
-    games_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
     game_name = request.param
-    game_file = os.path.join(games_dir, f'{game_name}.txt')
-    level_file = os.path.join(games_dir, f'{game_name}_lvl0.txt')
+    game_file = os.path.join(GAMES_DIR, f'{game_name}.txt')
+    level_file = os.path.join(GAMES_DIR, f'{game_name}_lvl0.txt')
     if not os.path.exists(game_file) or not os.path.exists(level_file):
         pytest.skip(f"Game files not found for {game_name}")
     return game_name, game_file, level_file

@@ -16,14 +16,9 @@ Key design decisions:
   Both use the same integer index ordering, so no translation is needed.
 """
 import os
-import sys
 import pytest
 import numpy as np
 import jax
-
-# Add py-vgdl to path so we can import it
-PYVGDL_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl')
-sys.path.insert(0, PYVGDL_DIR)
 
 try:
     import pygame
@@ -192,19 +187,17 @@ def test_initial_frame_matches(game_name):
 
 
 @pytest.mark.skipif(not (HAS_PYGAME and HAS_PYVGDL), reason=SKIP_MSG)
-@pytest.mark.xfail(reason="NPC movement is stochastic; different RNG implementations cause divergence after step 0")
+@pytest.mark.xfail(reason="Rendering test without RNG replay; NPC positions diverge after step 0 (state-level RNG replay exists in test_validate.py)")
 def test_action_sequence_chase():
     """
     Run a fixed action sequence on chase and compare each frame.
 
     Uses NOOP actions so avatar doesn't move, but NPCs (Chasers, Fleeing)
-    will move stochastically. Since the RNG states differ between engines,
-    NPC positions will diverge after step 0.
+    will move stochastically. This rendering test doesn't use RNG replay,
+    so NPC positions diverge after step 0.
 
-    This test is expected to fail (xfail) because:
-    - py-vgdl uses Python's random.choice(BASEDIRS) for NPC movement
-    - vgdl-jax uses jax.random for NPC movement
-    - These produce different random sequences, so NPC positions diverge
+    Note: RNG replay for state-level comparison exists in validate_harness.py
+    and is tested in test_validate.py::test_cross_engine_with_rng_replay.
     """
     pyvgdl_env = _setup_pyvgdl('chase')
     compiled, state, gd = _setup_jax('chase')

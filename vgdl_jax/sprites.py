@@ -6,13 +6,50 @@ from vgdl_jax.state import GameState
 DIRECTION_DELTAS = jnp.array([[-1, 0], [1, 0], [0, -1], [0, 1]], dtype=jnp.float32)
 
 
-def update_missile(state: GameState, type_idx, cooldown):
-    """Move along fixed orientation each tick (if cooldown met and alive)."""
+# ── Shared helpers ─────────────────────────────────────────────────────
+
+
+def prefix_sum_allocate(alive_mask, source_mask):
+    """Allocate dead slots to sources using prefix-sum.
+
+    Args:
+        alive_mask: [max_n] bool — current alive mask of the target type
+        source_mask: [N] bool — which sources want to spawn (N may differ from max_n)
+
+    Returns:
+        (should_fill, src_indices):
+            should_fill: [max_n] bool — which target slots to fill
+            src_indices: [max_n] int — which source maps to each target slot
+    """
+    n_spawns = source_mask.sum()
+    available = ~alive_mask
+    slot_rank = jnp.cumsum(available)
+    should_fill = available & (slot_rank <= n_spawns)
+    source_order = jnp.argsort(~source_mask)
+    src_indices = source_order[jnp.clip(slot_rank - 1, 0, source_mask.shape[0] - 1)]
+    return should_fill, src_indices
+
+
+def _move_with_cooldown(state, type_idx, cooldown):
+    """Apply cooldown-gated movement along orientation.
+
+    Returns:
+        (new_pos, new_timers, can_move)
+    """
     can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
-    delta = state.orientations[type_idx]  # [max_n, 2] float32
-    speed = state.speeds[type_idx]  # [max_n] float32
+    delta = state.orientations[type_idx]
+    speed = state.speeds[type_idx]
     new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
+    return new_pos, new_timers, can_move
+
+
+# ── NPC movement updates ──────────────────────────────────────────────
+
+
+def update_missile(state: GameState, type_idx, cooldown):
+    """Move along fixed orientation each tick (if cooldown met and alive)."""
+    new_pos, new_timers, _ = _move_with_cooldown(state, type_idx, cooldown)
     return state.replace(
         positions=state.positions.at[type_idx].set(new_pos),
         cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
@@ -25,11 +62,7 @@ def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
     max_n = state.alive.shape[1]
 
     # Move along current orientation (same as missile)
-    can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
-    delta = state.orientations[type_idx]
-    speed = state.speeds[type_idx]  # [max_n] float32
-    new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
-    new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
+    new_pos, new_timers, _ = _move_with_cooldown(state, type_idx, cooldown)
 
     # Randomly change direction with probability `prob`
     should_change = (jax.random.uniform(key_move, (max_n,)) < prob) & state.alive[type_idx]
@@ -53,7 +86,7 @@ def update_random_npc(state: GameState, type_idx, cooldown):
     # Random direction per instance
     dir_indices = jax.random.randint(key, (max_n,), 0, 4)
     deltas = DIRECTION_DELTAS[dir_indices]  # [max_n, 2]
-    speed = state.speeds[type_idx]  # [max_n] float32
+    speed = state.speeds[type_idx]
     new_pos = state.positions[type_idx] + deltas * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     return state.replace(
@@ -176,16 +209,8 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     rand_ok = jax.random.uniform(key, (max_n,)) < prob
     should_spawn = is_alive & timer_ready & under_total & rand_ok
 
-    n_spawns = should_spawn.sum()
-
     # Parallel slot allocation in target type
-    available = ~state.alive[target_type]
-    slot_rank = jnp.cumsum(available)  # 1-indexed rank per free slot
-    should_fill = available & (slot_rank <= n_spawns)
-
-    # Map each fill-slot to its source spawner
-    source_order = jnp.argsort(~should_spawn)  # spawning indices first
-    src_idx = source_order[jnp.clip(slot_rank - 1, 0, max_n - 1)]
+    should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], should_spawn)
     src_pos = state.positions[type_idx][src_idx]
 
     state = state.replace(
@@ -208,10 +233,9 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     )
 
     # Update spawn counts — only for spawners that actually got a slot
-    n_available = available.sum()
-    actual_n = jnp.minimum(n_spawns, n_available)
+    n_filled = should_fill.sum()
     spawn_rank = jnp.cumsum(should_spawn)
-    actually_spawned = should_spawn & (spawn_rank <= actual_n)
+    actually_spawned = should_spawn & (spawn_rank <= n_filled)
     new_counts = state.spawn_counts[type_idx] + actually_spawned.astype(jnp.int32)
     state = state.replace(
         spawn_counts=state.spawn_counts.at[type_idx].set(new_counts))
@@ -258,14 +282,7 @@ def update_spreader(state: GameState, type_idx, spreadprob):
     flat_pos = neighbor_pos.reshape(-1, 2)  # [max_n * 4, 2]
 
     # Prefix-sum slot allocation
-    n_spawns = flat_mask.sum()
-    available = ~state.alive[type_idx]
-    slot_rank = jnp.cumsum(available)
-    should_fill = available & (slot_rank <= n_spawns)
-
-    # Map each fill-slot to source spawn
-    source_order = jnp.argsort(~flat_mask)
-    src_idx = source_order[jnp.clip(slot_rank - 1, 0, max_n * 4 - 1)]
+    should_fill, src_idx = prefix_sum_allocate(state.alive[type_idx], flat_mask)
     src_pos = flat_pos[src_idx]
 
     state = state.replace(
@@ -373,7 +390,7 @@ def update_walk_jumper(state: GameState, type_idx, prob, strength, gravity, mass
 
 
 def update_inertial_avatar(state: GameState, action, avatar_type, n_move,
-                           mass, strength, height, width):
+                           mass, strength):
     """InertialAvatar: ContinuousPhysics, no gravity. Input = force direction.
 
     velocity += (direction * strength) / mass
@@ -405,7 +422,7 @@ def update_inertial_avatar(state: GameState, action, avatar_type, n_move,
 
 def update_mario_avatar(state: GameState, action, avatar_type,
                         mass, strength, jump_strength, gravity,
-                        airsteering, height, width):
+                        airsteering):
     """MarioAvatar: GravityPhysics. 6-action space.
 
     Actions: LEFT=0, RIGHT=1, JUMP=2, JUMP_LEFT=3, JUMP_RIGHT=4, NOOP=5.

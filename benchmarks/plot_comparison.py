@@ -9,7 +9,6 @@ Usage:
 import argparse
 import json
 import os
-import sys
 
 import matplotlib
 matplotlib.use('Agg')

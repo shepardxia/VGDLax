@@ -8,6 +8,20 @@ from vgdl_jax.sprites import DIRECTION_DELTAS
 from vgdl_jax.terminations import check_sprite_counter
 
 
+def _make_avatar_config(n_types, max_n, h=5, w=5):
+    """Helper to build minimal avatar_config + params for tests."""
+    avatar_config = dict(
+        avatar_type_idx=0, n_move_actions=4, cooldown=1,
+        can_shoot=False, shoot_action_idx=-1,
+        projectile_type_idx=-1,
+        projectile_orientation_from_avatar=False,
+        projectile_default_orientation=[0., 0.],
+        projectile_speed=0.0,
+    )
+    params = dict(n_types=n_types, max_n=max_n, height=h, width=w)
+    return avatar_config, params
+
+
 def test_step_avatar_wall_stepback():
     """Avatar at (1,0) moves RIGHT into wall at (1,1). stepBack reverts."""
     n_types = 2
@@ -35,15 +49,7 @@ def test_step_avatar_wall_stepback():
         dict(sprite_class=SpriteClass.MOVING_AVATAR, cooldown=1),
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=3, width=3)
+    avatar_config, params = _make_avatar_config(n_types, max_n, h=3, w=3)
 
     step_fn = build_step_fn(effects, terminations, sprite_configs,
                             avatar_config, params)
@@ -83,15 +89,7 @@ def test_step_kill_on_collision():
         dict(sprite_class=SpriteClass.MOVING_AVATAR, cooldown=1),
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=5, width=5)
+    avatar_config, params = _make_avatar_config(n_types, max_n)
 
     step_fn = build_step_fn(effects, terminations, sprite_configs,
                             avatar_config, params)
@@ -132,15 +130,7 @@ def test_step_eos_kills_missile():
         dict(sprite_class=SpriteClass.MOVING_AVATAR, cooldown=1),
         dict(sprite_class=SpriteClass.MISSILE, cooldown=1, flicker_limit=0),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=5, width=5)
+    avatar_config, params = _make_avatar_config(n_types, max_n)
 
     step_fn = build_step_fn(effects, terminations, sprite_configs,
                             avatar_config, params)
@@ -164,15 +154,7 @@ def test_step_avatar_no_clip():
     sprite_configs = [
         dict(sprite_class=SpriteClass.MOVING_AVATAR, cooldown=1),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=5, width=5)
+    avatar_config, params = _make_avatar_config(n_types, max_n)
     step_fn = build_step_fn([], [], sprite_configs, avatar_config, params)
 
     action = 0  # UP
@@ -195,16 +177,9 @@ def test_step_vertical_avatar():
     sprite_configs = [
         dict(sprite_class=SpriteClass.VERTICAL_AVATAR, cooldown=1),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=2, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-        direction_offset=0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=5, width=5)
+    avatar_config, params = _make_avatar_config(n_types, max_n)
+    avatar_config['n_move_actions'] = 2
+    avatar_config['direction_offset'] = 0
     step_fn = build_step_fn([], [], sprite_configs, avatar_config, params)
 
     # Action 0 = UP → (2,2) → (1,2)
@@ -229,15 +204,7 @@ def test_step_noop_increments_step():
     sprite_configs = [
         dict(sprite_class=SpriteClass.MOVING_AVATAR, cooldown=1),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=5, width=5)
+    avatar_config, params = _make_avatar_config(n_types, max_n)
 
     step_fn = build_step_fn([], [], sprite_configs, avatar_config, params)
     new_state = step_fn(state, 4)  # NOOP
@@ -267,15 +234,7 @@ def test_flip_direction_effect():
         dict(sprite_class=SpriteClass.MOVING_AVATAR, cooldown=1),
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=5, width=5)
+    avatar_config, params = _make_avatar_config(n_types, max_n)
     step_fn = build_step_fn(effects, [], sprite_configs, avatar_config, params)
 
     # Move avatar RIGHT to (2,3) → collides with NPC → flipDirection fires
@@ -311,15 +270,7 @@ def test_kill_if_alive_kills_on_collision():
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=5, width=5)
+    avatar_config, params = _make_avatar_config(n_types, max_n)
     step_fn = build_step_fn(effects, [], sprite_configs, avatar_config, params)
 
     new_state = step_fn(state, 4)  # NOOP — collision already exists
@@ -348,33 +299,11 @@ def test_kill_if_alive_spares_when_partner_dead():
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=5, width=5)
+    avatar_config, params = _make_avatar_config(n_types, max_n)
     step_fn = build_step_fn(effects, [], sprite_configs, avatar_config, params)
 
     new_state = step_fn(state, 4)  # NOOP
     assert new_state.alive[1, 0] == True  # type_a survives (partner dead)
-
-
-def _make_avatar_config(n_types, max_n, h=5, w=5):
-    """Helper to build minimal avatar_config + params for tests."""
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=h, width=w)
-    return avatar_config, params
 
 
 def test_kill_if_slow_kills():
@@ -767,16 +696,8 @@ def _make_step_fn_for_effect(effect_type, kwargs, n_types=2, max_n=3,
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0)
         for _ in range(n_types - 1)
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=n_types, max_n=max_n, height=height, width=width,
-                  n_resource_types=max(n_resource_types, 1))
+    avatar_config, params = _make_avatar_config(n_types, max_n, h=height, w=width)
+    params['n_resource_types'] = max(n_resource_types, 1)
     return build_step_fn(effects, [], sprite_configs, avatar_config, params)
 
 
@@ -873,15 +794,8 @@ def test_spend_avatar_resource():
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=3, max_n=3, height=5, width=5, n_resource_types=1)
+    avatar_config, params = _make_avatar_config(3, 3)
+    params['n_resource_types'] = 1
     step_fn = build_step_fn(effects, [], sprite_configs, avatar_config, params)
 
     new_state = step_fn(state, 4)
@@ -919,15 +833,7 @@ def test_kill_others():
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=3, max_n=3, height=5, width=5)
+    avatar_config, params = _make_avatar_config(3, 3)
     step_fn = build_step_fn(effects, [], sprite_configs, avatar_config, params)
 
     new_state = step_fn(state, 4)
@@ -1034,15 +940,7 @@ def test_transform_others_to():
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
         dict(sprite_class=SpriteClass.IMMOVABLE, cooldown=0, flicker_limit=0),
     ]
-    avatar_config = dict(
-        avatar_type_idx=0, n_move_actions=4, cooldown=1,
-        can_shoot=False, shoot_action_idx=-1,
-        projectile_type_idx=-1,
-        projectile_orientation_from_avatar=False,
-        projectile_default_orientation=[0., 0.],
-        projectile_speed=0.0,
-    )
-    params = dict(n_types=4, max_n=3, height=5, width=5)
+    avatar_config, params = _make_avatar_config(4, 3)
     step_fn = build_step_fn(effects, [], sprite_configs, avatar_config, params)
 
     new_state = step_fn(state, 4)

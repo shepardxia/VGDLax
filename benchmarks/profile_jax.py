@@ -13,7 +13,6 @@ import traceback
 from timeit import default_timer as timer
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 from vgdl_jax.env import VGDLJaxEnv

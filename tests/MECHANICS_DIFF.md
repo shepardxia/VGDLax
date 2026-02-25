@@ -5,15 +5,15 @@ These may cause state divergence during cross-engine validation.
 
 | ID | Difference | Severity | Status | Games Affected |
 |----|-----------|----------|--------|---------------|
-| A1 | Chaser tie-breaking | MODERATE | Open | Chase, MissileCommand, SurviveZombies |
-| A2 | SpawnPoint cooldown semantics | SIGNIFICANT | Open | Aliens, Frogs, SurviveZombies |
-| A3 | Avatar position clipping | MINOR | Open | (games without wall borders) |
-| A4 | Effect application timing | MODERATE | Open | All games with multiple effects |
-| A5 | Speed→cooldown conversion | SIGNIFICANT | Open | Games with speed != 1 |
-| A6 | Collision detection method | MINOR | Open | None (grid-aligned only) |
-| A7 | wallStop position correction | MINOR | Open | Continuous-physics games |
-| A8 | wallStop friction (dead parameter) | MINOR | Open | Continuous-physics games |
-| A9 | Continuous-physics collision threshold | MINOR | Open | Continuous-physics games |
+| A1 | Chaser tie-breaking | MODERATE | **Accepted** | Chase, MissileCommand, SurviveZombies |
+| A2 | SpawnPoint cooldown semantics | SIGNIFICANT | **Fixed** | ~~Aliens, Frogs, SurviveZombies~~ |
+| A3 | Avatar position clipping | MINOR | **Fixed** | ~~(games without wall borders)~~ |
+| A4 | Effect application timing | MODERATE | **Partially fixed** | Zelda (1 step in 20) |
+| A5 | Speed→cooldown conversion | SIGNIFICANT | **Fixed** | ~~Games with speed != 1~~ |
+| A6 | Collision detection method | MINOR | Accepted | None (grid-aligned only) |
+| A7 | wallStop position correction | MINOR | Accepted | Continuous-physics games |
+| A8 | wallStop friction (dead parameter) | MINOR | Accepted | Continuous-physics games |
+| A9 | Continuous-physics collision threshold | MINOR | Accepted | Continuous-physics games |
 
 ---
 
@@ -31,58 +31,47 @@ These may cause state divergence during cross-engine validation.
 
 ---
 
-## A2. SpawnPoint Cooldown Semantics (SIGNIFICANT)
+## A2. SpawnPoint Cooldown Semantics — FIXED
 
-**py-vgdl**: `game.time % self.cooldown == 0` — checks at exact global clock multiples. If prob check fails at tick `N*cooldown`, next attempt is `(N+1)*cooldown`.
+**Was**: Per-sprite timer vs global clock multiples caused different spawn timing.
 
-**vgdl-jax**: Per-sprite timer, `cooldown_timers >= cooldown`. Timer resets to 0 **only on successful spawn**. If prob check fails, timer stays above cooldown and sprite retries **every subsequent tick** until it succeeds.
-
-**Impact**: vgdl-jax spawners are more aggressive — they retry every tick once eligible, while py-vgdl only tries at cooldown multiples.
-
-**Files**:
-- `py-vgdl/vgdl/ontology/sprites.py:111-112`
-- `vgdl-jax/vgdl_jax/sprites.py:134-198`
+**Fix**: Timer resets on every spawn attempt (not just success), matching py-vgdl's per-cooldown-interval semantics.
 
 ---
 
-## A3. Avatar Position Clipping (MINOR)
+## A3. Avatar Position Clipping — FIXED
 
-**py-vgdl**: No explicit position clipping. Avatar can move off-screen; EOS effects or wall stepBack prevent it in practice.
+**Was**: Grid-physics avatars hard-clipped to bounds; py-vgdl does not.
 
-**vgdl-jax**: Grid-physics avatars (`_update_avatar`) hard clip position to `[0, height-1] x [0, width-1]`. Continuous-physics avatars (`update_inertial_avatar`, `update_mario_avatar`) do NOT clip — EOS effects and wallStop handle boundaries instead (matching py-vgdl). NPC positions are NOT clipped.
-
-**Impact**: Only matters for grid-physics games without wall borders. Most VGDL games have walls.
-
-**Files**:
-- `vgdl-jax/vgdl_jax/step.py` (`_update_avatar`)
-- `vgdl-jax/vgdl_jax/sprites.py` (`update_inertial_avatar`, `update_mario_avatar`)
+**Fix**: Removed clip from `_update_avatar`. Boundaries now handled by wall stepBack / EOS effects, matching py-vgdl.
 
 ---
 
-## A4. Effect Application Timing (MODERATE)
+## A4. Effect Application Timing (MODERATE) — Partially Fixed
 
-**py-vgdl**: Effects applied **immediately** per collision. If effect A kills sprite X, subsequent effects see X as dead (`if sprite not in self.kill_list`).
+**py-vgdl**: Effects applied **immediately** per collision. If effect A kills sprite X, subsequent effects see X as dead. Within one effect type, sprites are processed sequentially by iteration order.
 
-**vgdl-jax**: All collision masks for one effect are computed before applying. Multiple effects in the same step can "see" the same sprite as alive even if a prior effect killed it.
+**vgdl-jax**: Same-type effects (where `type_a == type_b`) now use `jax.lax.fori_loop` for sequential per-sprite processing with deferred kills, matching py-vgdl's iteration semantics. Cross-type effects remain batched (all collision masks computed before applying).
 
-**Impact**: Different kill ordering when multiple effects fire on the same sprite in the same step.
+**Impact**: Most games now match. Residual difference only when cross-type kill ordering matters within the same step. In practice, only zelda shows 1 divergent step in 20 (step 20, a monsterNormal position difference).
 
 **Files**:
 - `py-vgdl/vgdl/core.py:782-846`
-- `vgdl-jax/vgdl_jax/step.py:173-197`
+- `vgdl-jax/vgdl_jax/step.py` (`_apply_all_effects`, fori_loop path)
 
 ---
 
-## A5. Speed→Cooldown Conversion (SIGNIFICANT)
+## A5. Speed→Cooldown Conversion — FIXED
 
-**py-vgdl**: `speed=2` means move `2 * gridsize` pixels per step (can tunnel over obstacles).
+**Was**: Speed converted to cooldown at compile time (`effective_cooldown = max(1, round(cooldown/speed))`), producing integer-cell movement. py-vgdl moves `delta * speed` per tick, producing fractional positions.
 
-**vgdl-jax**: Converts speed to cooldown: `effective_cooldown = max(1, round(cooldown / speed))`. Speed=2 means move 1 cell every ~0.5 cooldown periods — same rate but no tunneling.
-
-**Impact**: Different movement distance per step for `speed != 1`. However, most standard VGDL games use `speed=1`.
+**Fix**: Movement functions now compute `delta * speed[:, None]` per tick, matching py-vgdl's fractional positions. AABB collision enabled for fractional-speed pairs. Sweep collision added for speed > 1 (marks all intermediate cells). EOS detection uses epsilon tolerance (0.01) to absorb float32 accumulation drift.
 
 **Files**:
-- `vgdl-jax/vgdl_jax/compiler.py` (speed→cooldown conversion)
+- `vgdl_jax/sprites.py` (update_missile, update_erratic_missile, update_random_npc, update_chaser)
+- `vgdl_jax/compiler.py` (fractional_speed_types, use_aabb, needs_sweep)
+- `vgdl_jax/step.py` (_build_swept_occupancy_grid, _collision_mask_sweep)
+- `vgdl_jax/collision.py` (detect_eos with _EOS_EPS tolerance)
 
 ---
 

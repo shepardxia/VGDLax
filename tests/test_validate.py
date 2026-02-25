@@ -4,20 +4,10 @@ Pytest tests for the validation harness.
 Tests validation levels 0-3 (py-vgdl) and cross-engine comparison (py-vgdl vs vgdl-jax).
 """
 import os
-import sys
 import pytest
 import numpy as np
 
-# Ensure tests/ is on path for sibling imports
-TESTS_DIR = os.path.dirname(__file__)
-if TESTS_DIR not in sys.path:
-    sys.path.insert(0, TESTS_DIR)
-
-PYVGDL_DIR = os.path.join(TESTS_DIR, '..', '..', 'py-vgdl')
-if PYVGDL_DIR not in sys.path:
-    sys.path.insert(0, PYVGDL_DIR)
-
-from conftest import GAMES_DIR
+from conftest import GAMES_DIR, ALL_GAMES
 from validate_harness import (
     validate_pyvgdl_loads,
     validate_pyvgdl_state_extraction,
@@ -33,11 +23,6 @@ from validate_harness import (
     BLOCK_SIZE,
 )
 from state_extractor import extract_pyvgdl_state
-
-ALL_GAMES = [
-    "chase", "zelda", "aliens", "missilecommand", "sokoban",
-    "portals", "boulderdash", "survivezombies", "frogs",
-]
 
 # Only sokoban is fully deterministic (no stochastic NPCs)
 DETERMINISTIC_GAMES = ["sokoban"]

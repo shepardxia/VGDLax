@@ -15,6 +15,7 @@ from vgdl_jax.data_model import (
 )
 from vgdl_jax.state import GameState, create_initial_state
 from vgdl_jax.step import build_step_fn
+from vgdl_jax.sprites import DIRECTION_DELTAS
 from vgdl_jax.terminations import check_sprite_counter, check_multi_sprite_counter, check_timeout, check_resource_counter
 
 
@@ -137,19 +138,18 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
 
     # Randomize orientations for RandomMissile sprites
     rng = jax.random.PRNGKey(0)
-    direction_deltas = jnp.array([[-1, 0], [1, 0], [0, -1], [0, 1]],
-                                  dtype=jnp.float32)
     for sd in game_def.sprites:
         if sd.sprite_class == SpriteClass.RANDOM_MISSILE:
             rng, key = jax.random.split(rng)
             n_placed = slot_counts.get(sd.type_idx, 0)
             if n_placed > 0:
                 dir_indices = jax.random.randint(key, (n_placed,), 0, 4)
-                random_oris = direction_deltas[dir_indices]
+                random_oris = DIRECTION_DELTAS[dir_indices]
                 state = state.replace(
                     orientations=state.orientations.at[
                         sd.type_idx, :n_placed].set(random_oris))
 
+    # ── 2. Build avatar config ──────────────────────────────────────────
     n_move, can_shoot = AVATAR_INFO[avatar_sd.sprite_class]
 
     # Direction offset: horizontal avatars map actions to LEFT/RIGHT (index 2,3)
@@ -214,13 +214,9 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     # ── 3. Build sprite configs ────────────────────────────────────────
     sprite_configs = []
     for sd in game_def.sprites:
-        # Speed is now a movement multiplier applied in sprites.py, not a cooldown divisor
-        base_cooldown = max(sd.cooldown, 1)
-        effective_cooldown = base_cooldown
-
         cfg = dict(
             sprite_class=sd.sprite_class,
-            cooldown=effective_cooldown,
+            cooldown=max(sd.cooldown, 1),
             flicker_limit=sd.flicker_limit,
         )
 
@@ -411,6 +407,23 @@ def _effect_type_str(effect_type_int):
     return mapping.get(effect_type_int, 'null')
 
 
+def _resolve_collect_resource_kwargs(ed, game_def, concrete_actor_idx,
+                                      resource_name_to_idx, resource_limits):
+    """Resolve resource kwargs for COLLECT_RESOURCE / AVATAR_COLLECT_RESOURCE."""
+    if concrete_actor_idx is not None:
+        res_sd = game_def.sprites[concrete_actor_idx]
+    else:
+        actor_indices = game_def.resolve_stype(ed.actor_stype)
+        res_sd = game_def.sprites[actor_indices[0]] if actor_indices else None
+    kwargs = {}
+    if res_sd is not None:
+        res_name = res_sd.resource_name or res_sd.key
+        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
+        kwargs['resource_value'] = res_sd.resource_value
+        kwargs['limit'] = resource_limits[kwargs['resource_idx']] if resource_limits else 100
+    return kwargs
+
+
 def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
                            concrete_actor_idx=None, concrete_actee_idx=None,
                            avatar_type_idx=None):
@@ -422,31 +435,18 @@ def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
         if indices:
             kwargs['new_type_idx'] = indices[0]
 
-    elif ed.effect_type in (EffectType.CHANGE_RESOURCE,):
+    elif ed.effect_type == EffectType.CHANGE_RESOURCE:
         res_name = ed.kwargs.get('resource', '')
         kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
         kwargs['value'] = ed.kwargs.get('value', 0)
         kwargs['limit'] = resource_limits[kwargs['resource_idx']] if resource_limits else 100
 
     elif ed.effect_type == EffectType.COLLECT_RESOURCE:
-        # The actor is a Resource sprite — look up its resource info
-        if concrete_actor_idx is not None:
-            res_sd = game_def.sprites[concrete_actor_idx]
-        else:
-            actor_indices = game_def.resolve_stype(ed.actor_stype)
-            res_sd = game_def.sprites[actor_indices[0]] if actor_indices else None
-        if res_sd is not None:
-            res_name = res_sd.resource_name or res_sd.key
-            kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-            kwargs['resource_value'] = res_sd.resource_value
-            kwargs['limit'] = resource_limits[kwargs['resource_idx']] if resource_limits else 100
+        kwargs.update(_resolve_collect_resource_kwargs(
+            ed, game_def, concrete_actor_idx, resource_name_to_idx, resource_limits))
 
-    elif ed.effect_type in (EffectType.KILL_IF_HAS_LESS, EffectType.KILL_IF_HAS_MORE):
-        res_name = ed.kwargs.get('resource', '')
-        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-        kwargs['limit'] = ed.kwargs.get('limit', 0)
-
-    elif ed.effect_type in (EffectType.KILL_IF_OTHER_HAS_MORE,
+    elif ed.effect_type in (EffectType.KILL_IF_HAS_LESS, EffectType.KILL_IF_HAS_MORE,
+                             EffectType.KILL_IF_OTHER_HAS_MORE,
                              EffectType.KILL_IF_OTHER_HAS_LESS):
         res_name = ed.kwargs.get('resource', '')
         kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
@@ -501,17 +501,8 @@ def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
         kwargs['avatar_type_idx'] = avatar_type_idx
 
     elif ed.effect_type == EffectType.AVATAR_COLLECT_RESOURCE:
-        # Actor is a Resource sprite — look up its resource info (same as collect_resource)
-        if concrete_actor_idx is not None:
-            res_sd = game_def.sprites[concrete_actor_idx]
-        else:
-            actor_indices = game_def.resolve_stype(ed.actor_stype)
-            res_sd = game_def.sprites[actor_indices[0]] if actor_indices else None
-        if res_sd is not None:
-            res_name = res_sd.resource_name or res_sd.key
-            kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-            kwargs['resource_value'] = res_sd.resource_value
-            kwargs['limit'] = resource_limits[kwargs['resource_idx']] if resource_limits else 100
+        kwargs.update(_resolve_collect_resource_kwargs(
+            ed, game_def, concrete_actor_idx, resource_name_to_idx, resource_limits))
         kwargs['avatar_type_idx'] = avatar_type_idx
 
     elif ed.effect_type == EffectType.TRANSFORM_OTHERS_TO:

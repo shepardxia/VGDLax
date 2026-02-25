@@ -12,13 +12,8 @@ Validation levels (inspired by PuzzleJAX validate_sols.py):
   4: Terminal state (score, done, win)
 """
 import os
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
-
-PYVGDL_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl')
-if PYVGDL_DIR not in sys.path:
-    sys.path.insert(0, PYVGDL_DIR)
 
 from conftest import GAMES_DIR
 BLOCK_SIZE = 10
@@ -524,6 +519,12 @@ _EFFECT_NAMES = {
     13: 'kill_if_from_above', 14: 'wrap_around', 15: 'bounce_forward',
     16: 'undo_all', 17: 'teleport_to_exit', 18: 'pull_with_it',
     19: 'wall_stop', 20: 'wall_bounce', 21: 'bounce_direction',
+    22: 'flip_direction', 23: 'kill_if_alive', 24: 'kill_if_slow',
+    25: 'convey_sprite', 26: 'clone_sprite', 27: 'spawn_if_has_more',
+    28: 'wind_gust', 29: 'slip_forward', 30: 'attract_gaze',
+    31: 'spend_resource', 32: 'spend_avatar_resource', 33: 'kill_others',
+    34: 'kill_if_avatar_without_resource', 35: 'avatar_collect_resource',
+    36: 'transform_others_to',
 }
 
 

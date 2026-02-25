@@ -29,12 +29,12 @@ Both engines implement these, but produce different outputs. See
 | ID | What | Impact | Status |
 |----|------|--------|--------|
 | A1 | Chaser: distance field (global BFS) vs greedy Manhattan | Different paths around obstacles | **Accepted** -- distance field is arguably *better* |
-| A2 | SpawnPoint cooldown semantics | vgdl-jax spawns more aggressively | **Fixed** -- exact cooldown match, timer resets on attempt |
-| A3 | Grid avatar clips to bounds | Differs in wall-less games | **Fixed** -- clip removed from `_update_avatar` |
-| A4 | Effects: per-effect-batch mask-then-apply vs immediate per-collision | Different kill ordering | **Accepted tradeoff** -- fundamental to JAX vectorized design |
-| A5 | Speed->cooldown conversion vs per-step distance scaling | Same rate over time | **By design** -- avoids tunneling |
+| A2 | SpawnPoint cooldown semantics | vgdl-jax spawns more aggressively | **Fixed** |
+| A3 | Grid avatar clips to bounds | Differs in wall-less games | **Fixed** |
+| A4 | Effects: batch vs immediate per-collision | Different kill ordering | **Partially fixed** -- same-type effects now sequential via fori_loop; cross-type still batched |
+| A5 | Speed→cooldown vs fractional movement | Integer vs fractional positions | **Fixed** -- sprites now move `delta * speed` per tick, matching py-vgdl |
 
-**A4** is the only remaining fidelity gap, and is a structural tradeoff.
+**A1** (accepted design choice) and **A4** (residual cross-type batching) are the only remaining gaps.
 
 ---
 
@@ -130,17 +130,30 @@ Both engines implement these, but produce different outputs. See
 
 ---
 
+## Cross-Engine Validation Results
+
+73 of 74 cross-engine tests pass (with RNG replay synchronization).
+
+| Game | Status | Notes |
+|------|--------|-------|
+| Chase | **PASS** | All 20 NOOP steps match |
+| Zelda | 1/20 diverged | Step 20 monsterNormal position (A4 residual) |
+| Aliens | **PASS** | |
+| MissileCommand | **PASS** | |
+| Sokoban | **PASS** | Exact deterministic match |
+| Portals | **PASS** | Fractional-speed RandomNPC matches |
+| BoulderDash | **PASS** | Fractional-speed boulders match |
+| SurviveZombies | **PASS** | |
+| Frogs | **PASS** | Fractional-speed trucks/logs match |
+
+---
+
 ## Remaining Known Limitations
 
-1. **A4 (effect timing)**: Effects are applied in batch per effect-type, not
-   immediately per-collision. This means if effect A kills sprite X, and effect B
-   checks if X is alive, B still sees X as alive within the same step. This is
-   inherent to the JAX vectorized approach.
+1. **A4 (effect timing)**: Cross-type effects are still applied in batch
+   (mask-then-apply), not immediately per-collision. Same-type effects are now
+   sequential via `fori_loop`. In practice, only zelda shows 1 divergent step.
 
 2. **A1 (chaser pathfinding)**: Distance field relaxation produces globally
    optimal paths vs py-vgdl's greedy Manhattan approach. This means chasers
-   may take different routes around obstacles.
-
-3. **A5 (speed handling)**: Speed is converted to cooldown at compile time.
-   Fractional speeds use integer cooldowns (speed=0.5 → cooldown=2), avoiding
-   the sub-pixel tunneling issues in py-vgdl.
+   may take different routes around obstacles. Accepted as a design improvement.
