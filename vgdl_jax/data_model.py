@@ -1,3 +1,4 @@
+import enum
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -6,8 +7,16 @@ from typing import Dict, List, Optional, Tuple, Any
 # from VGDL files are in pixel units and must be divided by this scale factor.
 PHYSICS_SCALE = 24
 
+# Named constants
+AABB_THRESHOLD = 1.0 - 1e-3        # collision overlap threshold (1.0 - AABB_EPS)
+N_DIRECTIONS = 4                     # cardinal directions (UP, DOWN, LEFT, RIGHT)
+DEFAULT_RESOURCE_LIMIT = 100         # fallback resource capacity
+NOISY_AVATAR_NOISE_LEVEL = 0.4      # NoisyRotatingFlippingAvatar noise probability
+GRAVITY_ACCEL = 1.0 / PHYSICS_SCALE  # standard gravity in grid-cell units
+SPRITE_HEADROOM = 10                 # extra slots per type beyond level count
 
-class SpriteClass:
+
+class SpriteClass(enum.IntEnum):
     IMMOVABLE = 0
     MISSILE = 1
     RANDOM_NPC = 2
@@ -45,7 +54,7 @@ class SpriteClass:
     WALK_JUMPER = 32
 
 
-class TerminationType:
+class TerminationType(enum.IntEnum):
     SPRITE_COUNTER = 0
     MULTI_SPRITE_COUNTER = 1
     TIMEOUT = 2
@@ -149,3 +158,64 @@ class GameDef:
 
     def resolve_stype(self, stype: str) -> List[int]:
         return self.stype_to_indices.get(stype, [])
+
+
+@dataclass
+class CompiledEffect:
+    type_a: int
+    is_eos: bool
+    effect_type: str
+    score_change: int
+    max_a: int
+    static_a_grid_idx: Optional[int] = None
+    static_b_grid_idx: Optional[int] = None
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+    # Non-EOS fields (ignored when is_eos=True)
+    type_b: int = -1
+    collision_mode: str = 'grid'
+    max_speed_cells: int = 1
+    max_b: int = 0
+
+
+@dataclass
+class AvatarConfig:
+    avatar_type_idx: int
+    n_move_actions: int
+    cooldown: int
+    can_shoot: bool
+    shoot_action_idx: int = -1
+    projectile_type_idx: int = -1
+    projectile_orientation_from_avatar: bool = False
+    projectile_default_orientation: Tuple[float, float] = (0.0, 0.0)
+    projectile_speed: float = 0.0
+    direction_offset: int = 0
+    physics_type: str = 'grid'
+    mass: float = 1.0
+    strength: float = 1.0
+    jump_strength: float = 1.0
+    airsteering: bool = False
+    gravity: float = 1.0
+    is_rotating: bool = False
+    is_flipping: bool = False
+    noise_level: float = 0.0
+    shoot_everywhere: bool = False
+    is_aimed: bool = False
+    can_move_aimed: bool = False
+    angle_diff: float = 0.05
+
+
+@dataclass
+class SpriteConfig:
+    sprite_class: int
+    cooldown: int
+    flicker_limit: int = 0
+    target_type_idx: int = -1
+    prob: float = 1.0
+    total: int = 0
+    spreadprob: float = 1.0
+    mass: float = 1.0
+    strength: float = 1.0
+    gravity: float = 0.0
+    spawn_cooldown: int = 1
+    target_orientation: Tuple[float, float] = (0.0, 0.0)
+    target_speed: float = 0.0

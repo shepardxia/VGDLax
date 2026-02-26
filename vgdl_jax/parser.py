@@ -4,7 +4,7 @@ Reads .txt game files and level files, produces a GameDef.
 """
 from collections import defaultdict
 from vgdl_jax.data_model import (
-    SpriteClass, TerminationType,
+    SpriteClass, TerminationType, STATIC_CLASSES,
     SpriteDef, EffectDef, TerminationDef, LevelDef, GameDef,
 )
 from vgdl_jax.effects import VGDL_TO_KEY
@@ -51,7 +51,23 @@ CLASS_MAP = {
     'MarioAvatar': SpriteClass.MARIO_AVATAR,
 }
 
-
+# Sprite classes that default to speed=1 in py-vgdl
+SPEED_1_CLASSES = {
+    SpriteClass.MOVING_AVATAR, SpriteClass.ORIENTED_AVATAR,
+    SpriteClass.HORIZONTAL_AVATAR, SpriteClass.FLAK_AVATAR,
+    SpriteClass.SHOOT_AVATAR, SpriteClass.RANDOM_NPC,
+    SpriteClass.CHASER, SpriteClass.FLEEING,
+    SpriteClass.MISSILE, SpriteClass.WALKER, SpriteClass.BOMBER,
+    SpriteClass.ERRATIC_MISSILE, SpriteClass.RANDOM_INERTIAL,
+    SpriteClass.RANDOM_MISSILE,
+    SpriteClass.INERTIAL_AVATAR, SpriteClass.MARIO_AVATAR,
+    SpriteClass.VERTICAL_AVATAR, SpriteClass.ROTATING_AVATAR,
+    SpriteClass.ROTATING_FLIPPING_AVATAR,
+    SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR,
+    SpriteClass.SHOOT_EVERYWHERE_AVATAR,
+    SpriteClass.AIMED_AVATAR, SpriteClass.AIMED_FLAK_AVATAR,
+    SpriteClass.WALK_JUMPER,
+}
 
 
 # py-vgdl uses Vector2(x, y) with screen coords: UP=(0,-1), DOWN=(0,1)
@@ -281,22 +297,6 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     # Extract known parameters with class-based defaults
     # In py-vgdl: MovingAvatar, RandomNPC, Chaser, Fleeing, Missile, Walker, Bomber
     # all default to speed=1
-    SPEED_1_CLASSES = {
-        SpriteClass.MOVING_AVATAR, SpriteClass.ORIENTED_AVATAR,
-        SpriteClass.HORIZONTAL_AVATAR, SpriteClass.FLAK_AVATAR,
-        SpriteClass.SHOOT_AVATAR, SpriteClass.RANDOM_NPC,
-        SpriteClass.CHASER, SpriteClass.FLEEING,
-        SpriteClass.MISSILE, SpriteClass.WALKER, SpriteClass.BOMBER,
-        SpriteClass.ERRATIC_MISSILE, SpriteClass.RANDOM_INERTIAL,
-        SpriteClass.RANDOM_MISSILE,
-        SpriteClass.INERTIAL_AVATAR, SpriteClass.MARIO_AVATAR,
-        SpriteClass.VERTICAL_AVATAR, SpriteClass.ROTATING_AVATAR,
-        SpriteClass.ROTATING_FLIPPING_AVATAR,
-        SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR,
-        SpriteClass.SHOOT_EVERYWHERE_AVATAR,
-        SpriteClass.AIMED_AVATAR, SpriteClass.AIMED_FLAK_AVATAR,
-        SpriteClass.WALK_JUMPER,
-    }
     default_speed = 1.0 if sc in SPEED_1_CLASSES else 0.0
     speed = args.get('speed', default_speed)
     if speed is None:
@@ -312,9 +312,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     else:
         orientation = (0.0, 1.0)  # default RIGHT in (row, col)
 
-    is_static = sc in (SpriteClass.IMMOVABLE, SpriteClass.PASSIVE,
-                       SpriteClass.RESOURCE, SpriteClass.PORTAL,
-                       SpriteClass.CONVEYOR)
+    is_static = sc in STATIC_CLASSES
 
     singleton = bool(args.get('singleton', False))
 
@@ -330,7 +328,9 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     if not isinstance(spawner_stype, str):
         spawner_stype = None
 
-    spawner_prob = float(args.get('prob', 1.0))
+    # ErraticMissile and WalkJumper default to prob=0.1 in py-vgdl
+    default_prob = 0.1 if sc in (SpriteClass.ERRATIC_MISSILE, SpriteClass.WALK_JUMPER) else 1.0
+    spawner_prob = float(args.get('prob', default_prob))
     spawner_total = int(args.get('total', 0))
 
     # Color: explicit override from game file > class default > white fallback
@@ -385,7 +385,9 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         physics_type = 'gravity'
 
     mass = float(args.get('mass', 1.0))
-    strength = float(args.get('strength', 3.0 if sc == SpriteClass.MARIO_AVATAR else 1.0))
+    # MarioAvatar defaults to strength=3, WalkJumper to 10, others to 1
+    default_strength = 3.0 if sc == SpriteClass.MARIO_AVATAR else (10.0 if sc == SpriteClass.WALK_JUMPER else 1.0)
+    strength = float(args.get('strength', default_strength))
     jump_strength = float(args.get('jump_strength', 10.0))
     airsteering = bool(args.get('airsteering', False))
     angle_diff = float(args.get('angle_diff', 0.05))

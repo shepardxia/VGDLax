@@ -7,7 +7,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from vgdl_jax.parser import parse_vgdl
+from vgdl_jax.parser import parse_vgdl, parse_vgdl_text
 from vgdl_jax.compiler import compile_game
 from vgdl_jax.render import render_rgb
 
@@ -28,6 +28,17 @@ class VGDLJaxEnv:
 
     def __init__(self, game_file, level_file, max_sprites_per_type=None):
         game_def = parse_vgdl(game_file, level_file)
+        self._init_from_game_def(game_def, max_sprites_per_type)
+
+    @classmethod
+    def from_text(cls, game_text, level_text, max_sprites_per_type=None):
+        """Create env from game/level text strings (no files needed)."""
+        env = cls.__new__(cls)
+        game_def = parse_vgdl_text(game_text, level_text)
+        env._init_from_game_def(game_def, max_sprites_per_type)
+        return env
+
+    def _init_from_game_def(self, game_def, max_sprites_per_type):
         self.compiled = compile_game(game_def, max_sprites_per_type)
         self.n_actions = self.compiled.n_actions
         self.noop_action = self.compiled.noop_action
@@ -39,6 +50,22 @@ class VGDLJaxEnv:
 
         # Static grid map: type_idx → static_grid_idx
         self._static_grid_map = self.compiled.static_grid_map
+
+        # Pre-compute observation index arrays for vectorized _get_obs
+        static_type_indices = []
+        static_grid_indices = []
+        dynamic_type_indices = []
+        for t in range(n_types):
+            if t in self._static_grid_map:
+                static_type_indices.append(t)
+                static_grid_indices.append(self._static_grid_map[t])
+            else:
+                dynamic_type_indices.append(t)
+        self._static_type_indices = jnp.array(static_type_indices, dtype=jnp.int32)
+        self._static_grid_indices = jnp.array(static_grid_indices, dtype=jnp.int32)
+        self._dynamic_type_indices = jnp.array(dynamic_type_indices, dtype=jnp.int32)
+        self._has_static = len(static_type_indices) > 0
+        self._has_dynamic = len(dynamic_type_indices) > 0
 
         # Build color table from sprite definitions
         self._colors = jnp.array(
@@ -62,18 +89,26 @@ class VGDLJaxEnv:
 
     def _get_obs(self, state):
         """Render state as a [n_types, height, width] binary grid."""
-        grid = jnp.zeros((self._n_types, self._height, self._width),
-                         dtype=jnp.bool_)
-        for t in range(self._n_types):
-            if t in self._static_grid_map:
-                sg_idx = self._static_grid_map[t]
-                grid = grid.at[t].set(state.static_grids[sg_idx])
-            else:
-                pos = state.positions[t].astype(jnp.int32)
-                alive = state.alive[t]
-                row = jnp.clip(pos[:, 0], 0, self._height - 1)
-                col = jnp.clip(pos[:, 1], 0, self._width - 1)
-                grid = grid.at[t, row, col].max(alive)
+        grid = jnp.zeros(self.obs_shape, dtype=jnp.bool_)
+
+        # Static types: batch copy from static_grids via index arrays
+        if self._has_static:
+            grid = grid.at[self._static_type_indices].set(
+                state.static_grids[self._static_grid_indices])
+
+        # Dynamic types: single vectorized scatter
+        if self._has_dynamic:
+            dyn_pos = state.positions[self._dynamic_type_indices]
+            dyn_alive = state.alive[self._dynamic_type_indices]
+            rows = jnp.clip(dyn_pos[:, :, 0].astype(jnp.int32),
+                            0, self._height - 1)
+            cols = jnp.clip(dyn_pos[:, :, 1].astype(jnp.int32),
+                            0, self._width - 1)
+            type_idx = jnp.broadcast_to(
+                self._dynamic_type_indices[:, None], dyn_alive.shape)
+            grid = grid.at[type_idx.ravel(), rows.ravel(), cols.ravel()].max(
+                dyn_alive.ravel())
+
         return grid
 
     def render(self, state, block_size=10):

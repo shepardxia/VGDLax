@@ -1,6 +1,17 @@
 import jax.numpy as jnp
 
 
+def _count_sprites(state, type_indices, static_grid_indices=None):
+    """Count total alive sprites across given dynamic type indices and static grid indices."""
+    count = jnp.int32(0)
+    for idx in type_indices:
+        count = count + state.alive[idx].sum()
+    if static_grid_indices:
+        for sg_idx in static_grid_indices:
+            count = count + state.static_grids[sg_idx].sum()
+    return count
+
+
 def check_sprite_counter(state, type_indices, limit, win,
                          static_grid_indices=None):
     """Game ends when total alive count of given types <= limit.
@@ -11,12 +22,7 @@ def check_sprite_counter(state, type_indices, limit, win,
         win: whether this is a win condition
         static_grid_indices: list of static grid indices (counted from static_grids)
     """
-    count = jnp.int32(0)
-    for idx in type_indices:
-        count = count + state.alive[idx].sum()
-    if static_grid_indices:
-        for sg_idx in static_grid_indices:
-            count = count + state.static_grids[sg_idx].sum()
+    count = _count_sprites(state, type_indices, static_grid_indices)
     ended = count <= limit
     return ended, jnp.bool_(win)
 
@@ -32,13 +38,11 @@ def check_multi_sprite_counter(state, type_indices_list, limit, win,
         static_grid_indices_list: list of lists of static grid indices
     """
     total = jnp.int32(0)
-    for indices in type_indices_list:
-        for idx in indices:
-            total = total + state.alive[idx].sum()
-    if static_grid_indices_list:
-        for sg_indices in static_grid_indices_list:
-            for sg_idx in sg_indices:
-                total = total + state.static_grids[sg_idx].sum()
+    for i, indices in enumerate(type_indices_list):
+        sg_indices = None
+        if static_grid_indices_list:
+            sg_indices = static_grid_indices_list[i]
+        total = total + _count_sprites(state, indices, sg_indices)
     ended = total == limit
     return ended, jnp.bool_(win)
 

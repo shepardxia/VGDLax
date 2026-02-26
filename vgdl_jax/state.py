@@ -34,7 +34,7 @@ def create_initial_state(n_types, max_n, height, width,
         positions=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
         alive=jnp.zeros((n_types, max_n), dtype=jnp.bool_),
         orientations=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
-        speeds=jnp.ones((n_types, max_n), dtype=jnp.float32),
+        speeds=jnp.ones((n_types, max_n), dtype=jnp.float32),  # speed=1.0 is the py-vgdl default
         cooldown_timers=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         ages=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         spawn_counts=jnp.zeros((n_types, max_n), dtype=jnp.int32),

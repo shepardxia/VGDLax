@@ -32,6 +32,39 @@ def _get_partner_coords(state, type_b, height, width):
     return ipos_b, r_b, c_b, in_bounds_b
 
 
+def _get_actor_coords(state, type_a, height, width):
+    """Get int32 positions and clipped coords for type_a sprites."""
+    ipos_a = state.positions[type_a].astype(jnp.int32)
+    r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
+    c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
+    return ipos_a, r_a, c_a
+
+
+def _apply_conditional_kill(state, type_a, should_kill, score_change):
+    """Kill type_a sprites where should_kill is True, scoring per-sprite."""
+    return state.replace(
+        alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
+        score=state.score + should_kill.sum() * jnp.int32(score_change),
+    )
+
+
+def _nearest_partner(pos_a, state, type_b, eff_b):
+    """Find nearest alive type_b sprite for each pos_a sprite. Returns [eff_a, 2] positions."""
+    pos_b = state.positions[type_b, :eff_b]
+    alive_b = state.alive[type_b, :eff_b]
+    diff = pos_a[:, None, :] - pos_b[None, :, :]
+    dist_sq = jnp.sum(diff ** 2, axis=-1)
+    dist_sq = jnp.where(alive_b[None, :], dist_sq, 1e10)
+    nearest_b = jnp.argmin(dist_sq, axis=1)
+    return pos_b[nearest_b]
+
+
+def _clear_static_cells(state, sg_idx, clear_mask):
+    """Clear cells from a static grid. Returns updated state."""
+    return state.replace(static_grids=state.static_grids.at[sg_idx].set(
+        state.static_grids[sg_idx] & ~clear_mask))
+
+
 # ── Kill / removal ─────────────────────────────────────────────────────
 
 
@@ -48,45 +81,30 @@ def kill_both(state, type_a, type_b, mask, score_delta, height, width, kwargs=No
     if kwargs is None:
         kwargs = {}
     static_b_grid_idx = kwargs.get('static_b_grid_idx')
-    if static_b_grid_idx is not None:
-        # type_b is a static grid — clear cells where type_a collided
-        ipos_a = state.positions[type_a].astype(jnp.int32)
-        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
+    if static_b_grid_idx is not None or type_b >= 0:
+        # Build collision grid from type_a positions (shared by both paths)
+        _, r_a, c_a = _get_actor_coords(state, type_a, height, width)
         grid_coll = jnp.zeros((height, width), dtype=jnp.bool_)
         grid_coll = grid_coll.at[r_a, c_a].max(mask)
-        new_grids = state.static_grids.at[static_b_grid_idx].set(
-            state.static_grids[static_b_grid_idx] & ~grid_coll)
-        state = state.replace(static_grids=new_grids)
-    elif type_b >= 0:
-        ipos_a = state.positions[type_a].astype(jnp.int32)
-        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
-        grid_coll = jnp.zeros((height, width), dtype=jnp.bool_)
-        grid_coll = grid_coll.at[r_a, c_a].max(mask)
-        _, r_b, c_b, in_bounds_b = _get_partner_coords(state, type_b, height, width)
-        mask_b = grid_coll[r_b, c_b] & state.alive[type_b] & in_bounds_b
-        state = state.replace(
-            alive=state.alive.at[type_b].set(state.alive[type_b] & ~mask_b))
+        if static_b_grid_idx is not None:
+            state = _clear_static_cells(state, static_b_grid_idx, grid_coll)
+        else:
+            _, r_b, c_b, in_bounds_b = _get_partner_coords(state, type_b, height, width)
+            mask_b = grid_coll[r_b, c_b] & state.alive[type_b] & in_bounds_b
+            state = state.replace(
+                alive=state.alive.at[type_b].set(state.alive[type_b] & ~mask_b))
     return state.replace(score=state.score + score_delta)
 
 
-def kill_if_alive(state, type_a, mask, score_delta, **_):
+def kill_if_alive(state, **kwargs):
     """Kill type_a if type_b is alive (collision mask already requires type_b alive)."""
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~mask),
-        score=state.score + score_delta,
-    )
+    return kill_sprite(state, **kwargs)
 
 
 def kill_if_slow(state, type_a, mask, score_change, kwargs, **_):
     limitspeed = kwargs.get('limitspeed', 0.0)
-    is_slow = state.speeds[type_a] < limitspeed
-    should_kill = mask & is_slow
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
-        score=state.score + should_kill.sum() * jnp.int32(score_change),
-    )
+    should_kill = mask & (state.speeds[type_a] < limitspeed)
+    return _apply_conditional_kill(state, type_a, should_kill, score_change)
 
 
 def kill_others(state, type_a, mask, score_delta, kwargs, **_):
@@ -106,9 +124,7 @@ def kill_others(state, type_a, mask, score_delta, kwargs, **_):
 def kill_if_from_above(state, prev_positions, type_a, type_b, mask,
                        score_change, height, width, **_):
     if type_b >= 0:
-        ipos_a = state.positions[type_a].astype(jnp.int32)
-        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
+        _, r_a, c_a = _get_actor_coords(state, type_a, height, width)
         iprev_b = prev_positions[type_b].astype(jnp.int32)
         icurr_b = state.positions[type_b].astype(jnp.int32)
         fell_down = (icurr_b[:, 0] > iprev_b[:, 0]) & state.alive[type_b]
@@ -119,10 +135,7 @@ def kill_if_from_above(state, prev_positions, type_a, type_b, mask,
         should_kill = mask & from_above_grid[r_a, c_a]
     else:
         should_kill = jnp.zeros_like(mask)
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
-        score=state.score + should_kill.sum() * jnp.int32(score_change),
-    )
+    return _apply_conditional_kill(state, type_a, should_kill, score_change)
 
 
 # ── Position and orientation ───────────────────────────────────────────
@@ -230,9 +243,7 @@ def collect_resource(state, type_a, type_b, mask, score_delta,
     r_value = kwargs.get('resource_value', 1)
     limit = kwargs.get('limit', 100)
     if type_b >= 0:
-        ipos_a = state.positions[type_a].astype(jnp.int32)
-        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
+        _, r_a, c_a = _get_actor_coords(state, type_a, height, width)
         grid_coll = jnp.zeros((height, width), dtype=jnp.bool_)
         grid_coll = grid_coll.at[r_a, c_a].max(mask)
         _, r_b, c_b, in_bounds_b = _get_partner_coords(state, type_b, height, width)
@@ -289,10 +300,7 @@ def _kill_if_resource(state, type_a, mask, score_change, kwargs, compare_fn):
     limit = kwargs.get('limit', 0)
     cur = state.resources[type_a, :, r_idx]
     should_kill = mask & compare_fn(cur, limit)
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
-        score=state.score + should_kill.sum() * jnp.int32(score_change),
-    )
+    return _apply_conditional_kill(state, type_a, should_kill, score_change)
 
 
 def kill_if_has_less(state, type_a, mask, score_change, kwargs, **_):
@@ -305,52 +313,39 @@ def kill_if_has_more(state, type_a, mask, score_change, kwargs, **_):
     return _kill_if_resource(state, type_a, mask, score_change, kwargs, jnp.greater_equal)
 
 
-def kill_if_other_has_more(state, type_a, type_b, mask, score_change,
-                           kwargs, height, width, **_):
-    """Kill type_a if type_b (partner) has resource >= limit."""
+def _kill_if_other_resource(state, type_a, type_b, mask, score_change,
+                            kwargs, height, width, compare_fn, fill_val):
+    """Kill type_a based on type_b's resource level. Shared by has_more/has_less."""
     r_idx = kwargs.get('resource_idx', 0)
     limit = kwargs.get('limit', 0)
     if type_b >= 0:
         _, r_b, c_b, _ = _get_partner_coords(state, type_b, height, width)
-        res_grid = jnp.zeros((height, width), dtype=jnp.int32)
+        res_grid = jnp.full((height, width), fill_val, dtype=jnp.int32)
         b_res = state.resources[type_b, :, r_idx]
         res_grid = res_grid.at[r_b, c_b].max(
-            jnp.where(state.alive[type_b], b_res, 0))
-        ipos_a = state.positions[type_a].astype(jnp.int32)
-        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
+            jnp.where(state.alive[type_b], b_res, fill_val))
+        _, r_a, c_a = _get_actor_coords(state, type_a, height, width)
         partner_res = res_grid[r_a, c_a]
-        should_kill = mask & (partner_res >= limit)
+        should_kill = mask & compare_fn(partner_res, limit)
     else:
         should_kill = jnp.zeros_like(mask)
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
-        score=state.score + should_kill.sum() * jnp.int32(score_change),
-    )
+    return _apply_conditional_kill(state, type_a, should_kill, score_change)
+
+
+def kill_if_other_has_more(state, type_a, type_b, mask, score_change,
+                           kwargs, height, width, **_):
+    """Kill type_a if type_b (partner) has resource >= limit."""
+    return _kill_if_other_resource(
+        state, type_a, type_b, mask, score_change, kwargs, height, width,
+        compare_fn=jnp.greater_equal, fill_val=0)
 
 
 def kill_if_other_has_less(state, type_a, type_b, mask, score_change,
                            kwargs, height, width, **_):
     """Kill type_a if type_b (partner) has resource <= limit."""
-    r_idx = kwargs.get('resource_idx', 0)
-    limit = kwargs.get('limit', 0)
-    if type_b >= 0:
-        _, r_b, c_b, _ = _get_partner_coords(state, type_b, height, width)
-        res_grid = jnp.full((height, width), -1, dtype=jnp.int32)
-        b_res = state.resources[type_b, :, r_idx]
-        res_grid = res_grid.at[r_b, c_b].max(
-            jnp.where(state.alive[type_b], b_res, -1))
-        ipos_a = state.positions[type_a].astype(jnp.int32)
-        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
-        partner_res = res_grid[r_a, c_a]
-        should_kill = mask & (partner_res >= 0) & (partner_res <= limit)
-    else:
-        should_kill = jnp.zeros_like(mask)
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
-        score=state.score + should_kill.sum() * jnp.int32(score_change),
-    )
+    return _kill_if_other_resource(
+        state, type_a, type_b, mask, score_change, kwargs, height, width,
+        compare_fn=lambda r, l: (r >= 0) & (r <= l), fill_val=-1)
 
 
 def kill_if_avatar_without_resource(state, type_a, mask, score_change, kwargs, **_):
@@ -358,10 +353,7 @@ def kill_if_avatar_without_resource(state, type_a, mask, score_change, kwargs, *
     r_idx = kwargs.get('resource_idx', 0)
     avatar_has = state.resources[ati, 0, r_idx] > 0
     should_kill = mask & ~avatar_has
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
-        score=state.score + should_kill.sum() * jnp.int32(score_change),
-    )
+    return _apply_conditional_kill(state, type_a, should_kill, score_change)
 
 
 # ── Spawn and transform ───────────────────────────────────────────────
@@ -688,13 +680,7 @@ def wall_bounce(state, prev_positions, type_a, type_b, mask,
         col_diff = jnp.abs(pos[:, 1] - c_curr.astype(jnp.float32))
         is_vertical = row_diff >= col_diff
     elif type_b >= 0:
-        pos_b_all = state.positions[type_b, :eff_b]
-        alive_b = state.alive[type_b, :eff_b]
-        diff_ab = pos[:, None, :] - pos_b_all[None, :, :]   # [eff_a, eff_b, 2]
-        dist_sq = jnp.sum(diff_ab ** 2, axis=-1)
-        dist_sq = jnp.where(alive_b[None, :], dist_sq, 1e10)
-        nearest_b = jnp.argmin(dist_sq, axis=1)    # [eff_a] indices into [eff_b]
-        nb_pos = pos_b_all[nearest_b]
+        nb_pos = _nearest_partner(pos, state, type_b, eff_b)
         row_diff = jnp.abs(pos[:, 0] - nb_pos[:, 0])
         col_diff = jnp.abs(pos[:, 1] - nb_pos[:, 1])
         is_vertical = row_diff >= col_diff
@@ -750,13 +736,7 @@ def bounce_direction(state, prev_positions, type_a, type_b, mask,
             nb_pos = jnp.stack([r_curr.astype(jnp.float32),
                                 c_curr.astype(jnp.float32)], axis=-1)
         else:
-            pos_b = state.positions[type_b, :eff_b]
-            diff = pos_a[:, None, :] - pos_b[None, :, :]     # [eff_a, eff_b, 2]
-            dist_sq = jnp.sum(diff ** 2, axis=-1)
-            alive_b = state.alive[type_b, :eff_b]
-            dist_sq = jnp.where(alive_b[None, :], dist_sq, 1e10)
-            nearest_b = jnp.argmin(dist_sq, axis=1)  # [eff_a] indices into [eff_b]
-            nb_pos = pos_b[nearest_b]
+            nb_pos = _nearest_partner(pos_a, state, type_b, eff_b)
 
         n = pos_a - nb_pos
         n_len = jnp.sqrt(jnp.sum(n ** 2, axis=-1, keepdims=True))
@@ -849,129 +829,113 @@ EFFECT_DISPATCH = {v[1]: v[0] for v in EFFECT_REGISTRY.values()}
 VGDL_TO_KEY = {k: v[1] for k, v in EFFECT_REGISTRY.items()}
 
 
+def _static_kill_if_other_resource(state, sg_idx, type_b, grid_mask,
+                                    score_change, kwargs, height, width,
+                                    compare_fn):
+    """Conditionally clear static grid cells based on type_b's resource level.
+
+    Used by kill_if_other_has_more (compare_fn=jnp.greater_equal) and
+    kill_if_other_has_less (compare_fn=jnp.less_equal).
+    """
+    r_idx = kwargs.get('resource_idx', 0)
+    limit = kwargs.get('limit', 0)
+    if type_b >= 0:
+        ipos_b = state.positions[type_b].astype(jnp.int32)
+        r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
+        c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
+        ib_b = in_bounds(ipos_b, height, width)
+        b_matches = compare_fn(state.resources[type_b, :, r_idx], limit) & state.alive[type_b] & ib_b
+        res_grid = jnp.zeros((height, width), dtype=jnp.bool_)
+        res_grid = res_grid.at[r_b, c_b].max(b_matches)
+        kill_mask = grid_mask & res_grid
+    else:
+        kill_mask = jnp.zeros_like(grid_mask)
+    n_cond = kill_mask.sum()
+    state = _clear_static_cells(state, sg_idx, kill_mask)
+    return state.replace(
+        score=state.score + n_cond * jnp.int32(score_change))
+
+
+def _static_kill_sprite(state, sg_idx, type_b, grid_mask, score_change, kwargs, height, width):
+    n_killed = grid_mask.sum()
+    state = _clear_static_cells(state, sg_idx, grid_mask)
+    return state.replace(score=state.score + n_killed * jnp.int32(score_change))
+
+
+def _static_kill_both(state, sg_idx, type_b, grid_mask, score_change, kwargs, height, width):
+    n_killed = grid_mask.sum()
+    state = _clear_static_cells(state, sg_idx, grid_mask)
+    if type_b >= 0:
+        ipos_b = state.positions[type_b].astype(jnp.int32)
+        r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
+        c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
+        ib_b = in_bounds(ipos_b, height, width)
+        mask_b = grid_mask[r_b, c_b] & state.alive[type_b] & ib_b
+        state = state.replace(
+            alive=state.alive.at[type_b].set(state.alive[type_b] & ~mask_b))
+    return state.replace(score=state.score + n_killed * jnp.int32(score_change))
+
+
+def _static_kill_if_other_has_more(state, sg_idx, type_b, grid_mask,
+                                    score_change, kwargs, height, width):
+    return _static_kill_if_other_resource(
+        state, sg_idx, type_b, grid_mask, score_change, kwargs,
+        height, width, jnp.greater_equal)
+
+
+def _static_kill_if_other_has_less(state, sg_idx, type_b, grid_mask,
+                                    score_change, kwargs, height, width):
+    return _static_kill_if_other_resource(
+        state, sg_idx, type_b, grid_mask, score_change, kwargs,
+        height, width, jnp.less_equal)
+
+
+def _static_kill_if_avatar_without_resource(state, sg_idx, type_b, grid_mask,
+                                             score_change, kwargs, height, width):
+    ati = kwargs.get('avatar_type_idx', 0)
+    r_idx = kwargs.get('resource_idx', 0)
+    avatar_has = state.resources[ati, 0, r_idx] > 0
+    kill_mask = grid_mask & ~avatar_has
+    n_cond = kill_mask.sum()
+    state = _clear_static_cells(state, sg_idx, kill_mask)
+    return state.replace(
+        score=state.score + n_cond * jnp.int32(score_change))
+
+
+def _static_collect_resource(state, sg_idx, type_b, grid_mask,
+                              score_change, kwargs, height, width):
+    n_killed = grid_mask.sum()
+    state = _clear_static_cells(state, sg_idx, grid_mask)
+    r_idx = kwargs.get('resource_idx', 0)
+    r_val = kwargs.get('resource_value', 1)
+    limit = kwargs.get('limit', 100)
+    ati = kwargs.get('avatar_type_idx', type_b)
+    current = state.resources[ati, 0, r_idx]
+    new_res = jnp.minimum(current + n_killed * r_val, limit)
+    return state.replace(
+        resources=state.resources.at[ati, 0, r_idx].set(new_res),
+        score=state.score + n_killed * jnp.int32(score_change))
+
+
+_STATIC_A_HANDLERS = {
+    'kill_sprite': _static_kill_sprite,
+    'kill_both': _static_kill_both,
+    'kill_if_other_has_more': _static_kill_if_other_has_more,
+    'kill_if_other_has_less': _static_kill_if_other_has_less,
+    'kill_if_avatar_without_resource': _static_kill_if_avatar_without_resource,
+    'collect_resource': _static_collect_resource,
+    'avatar_collect_resource': _static_collect_resource,
+}
+
+
 def apply_static_a_effect(state, static_a_grid_idx, type_b, grid_mask,
                           effect_type, score_change, kwargs, height, width):
-    """Apply an effect where type_a is stored as a static grid.
-
-    Args:
-        state: GameState
-        static_a_grid_idx: index into state.static_grids for type_a
-        type_b: dynamic type index of the collision partner
-        grid_mask: [H, W] bool — cells where static type_a overlaps type_b
-        effect_type: str
-        score_change: int
-        kwargs: dict
-        height, width: grid dimensions
-
-    Only a subset of effects make sense for static type_a:
-    - kill_sprite: clear grid cells
-    - kill_both: clear grid cells + kill type_b
-    - kill_if_other_has_more/less: conditional clear
-    - kill_if_avatar_without_resource: conditional clear
-    - collect_resource / avatar_collect_resource: clear + add resource
-    """
-    sg_idx = static_a_grid_idx
-    n_killed = grid_mask.sum()
-
-    if effect_type == 'kill_sprite':
-        new_grids = state.static_grids.at[sg_idx].set(
-            state.static_grids[sg_idx] & ~grid_mask)
-        return state.replace(
-            static_grids=new_grids,
-            score=state.score + n_killed * jnp.int32(score_change))
-
-    elif effect_type == 'kill_both':
-        new_grids = state.static_grids.at[sg_idx].set(
-            state.static_grids[sg_idx] & ~grid_mask)
-        # Also kill type_b sprites at collision cells
-        if type_b >= 0:
-            ipos_b = state.positions[type_b].astype(jnp.int32)
-            r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-            c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-            ib_b = in_bounds(ipos_b, height, width)
-            mask_b = grid_mask[r_b, c_b] & state.alive[type_b] & ib_b
-            return state.replace(
-                static_grids=new_grids,
-                alive=state.alive.at[type_b].set(state.alive[type_b] & ~mask_b),
-                score=state.score + n_killed * jnp.int32(score_change))
-        return state.replace(
-            static_grids=new_grids,
-            score=state.score + n_killed * jnp.int32(score_change))
-
-    elif effect_type == 'kill_if_other_has_more':
-        r_idx = kwargs.get('resource_idx', 0)
-        limit = kwargs.get('limit', 0)
-        if type_b >= 0:
-            # Check if type_b at collision cells has resource >= limit
-            ipos_b = state.positions[type_b].astype(jnp.int32)
-            r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-            c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-            ib_b = in_bounds(ipos_b, height, width)
-            b_has_enough = (state.resources[type_b, :, r_idx] >= limit) & state.alive[type_b] & ib_b
-            # Build grid of cells where type_b has enough
-            res_grid = jnp.zeros((height, width), dtype=jnp.bool_)
-            res_grid = res_grid.at[r_b, c_b].max(b_has_enough)
-            kill_mask = grid_mask & res_grid
-        else:
-            kill_mask = jnp.zeros_like(grid_mask)
-        n_cond = kill_mask.sum()
-        new_grids = state.static_grids.at[sg_idx].set(
-            state.static_grids[sg_idx] & ~kill_mask)
-        return state.replace(
-            static_grids=new_grids,
-            score=state.score + n_cond * jnp.int32(score_change))
-
-    elif effect_type == 'kill_if_other_has_less':
-        r_idx = kwargs.get('resource_idx', 0)
-        limit = kwargs.get('limit', 0)
-        if type_b >= 0:
-            ipos_b = state.positions[type_b].astype(jnp.int32)
-            r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-            c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-            ib_b = in_bounds(ipos_b, height, width)
-            b_has_less = (state.resources[type_b, :, r_idx] <= limit) & state.alive[type_b] & ib_b
-            res_grid = jnp.zeros((height, width), dtype=jnp.bool_)
-            res_grid = res_grid.at[r_b, c_b].max(b_has_less)
-            kill_mask = grid_mask & res_grid
-        else:
-            kill_mask = jnp.zeros_like(grid_mask)
-        n_cond = kill_mask.sum()
-        new_grids = state.static_grids.at[sg_idx].set(
-            state.static_grids[sg_idx] & ~kill_mask)
-        return state.replace(
-            static_grids=new_grids,
-            score=state.score + n_cond * jnp.int32(score_change))
-
-    elif effect_type == 'kill_if_avatar_without_resource':
-        ati = kwargs.get('avatar_type_idx', 0)
-        r_idx = kwargs.get('resource_idx', 0)
-        avatar_has = state.resources[ati, 0, r_idx] > 0
-        kill_mask = grid_mask & ~avatar_has
-        n_cond = kill_mask.sum()
-        new_grids = state.static_grids.at[sg_idx].set(
-            state.static_grids[sg_idx] & ~kill_mask)
-        return state.replace(
-            static_grids=new_grids,
-            score=state.score + n_cond * jnp.int32(score_change))
-
-    elif effect_type in ('collect_resource', 'avatar_collect_resource'):
-        # Kill static sprite + add resource to avatar
-        new_grids = state.static_grids.at[sg_idx].set(
-            state.static_grids[sg_idx] & ~grid_mask)
-        r_idx = kwargs.get('resource_idx', 0)
-        r_val = kwargs.get('resource_value', 1)
-        limit = kwargs.get('limit', 100)
-        ati = kwargs.get('avatar_type_idx', type_b)
-        current = state.resources[ati, 0, r_idx]
-        new_res = jnp.minimum(current + n_killed * r_val, limit)
-        return state.replace(
-            static_grids=new_grids,
-            resources=state.resources.at[ati, 0, r_idx].set(new_res),
-            score=state.score + n_killed * jnp.int32(score_change))
-
-    else:
-        # Unsupported effect on static type_a — no-op
-        return state
+    """Apply an effect where type_a is stored as a static grid."""
+    handler = _STATIC_A_HANDLERS.get(effect_type)
+    if handler is not None:
+        return handler(state, static_a_grid_idx, type_b, grid_mask,
+                       score_change, kwargs, height, width)
+    return state  # Unsupported effect — no-op
 
 
 def apply_masked_effect(state, prev_positions, type_a, type_b, mask,

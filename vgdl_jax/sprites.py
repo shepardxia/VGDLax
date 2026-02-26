@@ -1,6 +1,8 @@
 import jax
 import jax.numpy as jnp
 from vgdl_jax.state import GameState
+from vgdl_jax.collision import in_bounds
+from vgdl_jax.data_model import N_DIRECTIONS
 
 # UP, DOWN, LEFT, RIGHT
 DIRECTION_DELTAS = jnp.array([[-1, 0], [1, 0], [0, -1], [0, 1]], dtype=jnp.float32)
@@ -51,16 +53,26 @@ def _move_with_cooldown(state, type_idx, cooldown, deltas=None):
     return new_pos, new_timers, can_move
 
 
+def _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=None, rng=None):
+    """Write back NPC movement results: positions + timers, optionally orientations + rng."""
+    updates = dict(
+        positions=state.positions.at[type_idx].set(new_pos),
+        cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
+    )
+    if new_ori is not None:
+        updates['orientations'] = state.orientations.at[type_idx].set(new_ori)
+    if rng is not None:
+        updates['rng'] = rng
+    return state.replace(**updates)
+
+
 # ── NPC movement updates ──────────────────────────────────────────────
 
 
 def update_missile(state: GameState, type_idx, cooldown):
     """Move along fixed orientation each tick (if cooldown met and alive)."""
     new_pos, new_timers, _ = _move_with_cooldown(state, type_idx, cooldown)
-    return state.replace(
-        positions=state.positions.at[type_idx].set(new_pos),
-        cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
-    )
+    return _apply_npc_move(state, type_idx, new_pos, new_timers)
 
 
 def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
@@ -73,32 +85,22 @@ def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
 
     # Randomly change direction with probability `prob`
     should_change = (jax.random.uniform(key_move, (max_n,)) < prob) & state.alive[type_idx]
-    dir_indices = jax.random.randint(key_dir, (max_n,), 0, 4)
+    dir_indices = jax.random.randint(key_dir, (max_n,), 0, N_DIRECTIONS)
     random_ori = DIRECTION_DELTAS[dir_indices]
     new_ori = jnp.where(should_change[:, None], random_ori, state.orientations[type_idx])
 
-    return state.replace(
-        positions=state.positions.at[type_idx].set(new_pos),
-        cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
-        orientations=state.orientations.at[type_idx].set(new_ori),
-        rng=rng,
-    )
+    return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng)
 
 
 def update_random_npc(state: GameState, type_idx, cooldown):
     """Pick a random direction each move."""
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
-    dir_indices = jax.random.randint(key, (max_n,), 0, 4)
+    dir_indices = jax.random.randint(key, (max_n,), 0, N_DIRECTIONS)
     deltas = DIRECTION_DELTAS[dir_indices]
     new_pos, new_timers, can_move = _move_with_cooldown(state, type_idx, cooldown, deltas=deltas)
     new_ori = jnp.where(can_move[:, None], deltas, state.orientations[type_idx])
-    return state.replace(
-        positions=state.positions.at[type_idx].set(new_pos),
-        cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
-        orientations=state.orientations.at[type_idx].set(new_ori),
-        rng=rng,
-    )
+    return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng)
 
 
 def _manhattan_distance_field(target_pos, target_alive, height, width):
@@ -111,11 +113,8 @@ def _manhattan_distance_field(target_pos, target_alive, height, width):
     # Initialize: 0 at alive target cells, INF elsewhere
     grid = jnp.full((height, width), INF, dtype=jnp.int32)
     itarget_pos = target_pos.astype(jnp.int32)
-    in_bounds = (
-        (itarget_pos[:, 0] >= 0) & (itarget_pos[:, 0] < height) &
-        (itarget_pos[:, 1] >= 0) & (itarget_pos[:, 1] < width)
-    )
-    effective = target_alive & in_bounds
+    ib = in_bounds(itarget_pos, height, width)
+    effective = target_alive & ib
     r = jnp.clip(itarget_pos[:, 0], 0, height - 1)
     c = jnp.clip(itarget_pos[:, 1], 0, width - 1)
     grid = grid.at[r, c].min(jnp.where(effective, jnp.int32(0), INF))
@@ -133,18 +132,19 @@ def _manhattan_distance_field(target_pos, target_alive, height, width):
 
 
 def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
-                  fleeing=False, height=0, width=0):
+                  fleeing=False, height=0, width=0, dist_field=None):
     """Move toward (or away from) nearest target using grid distance field. O(H*W + N)."""
     rng, key = jax.random.split(state.rng)
     can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
 
     chaser_pos = state.positions[type_idx].astype(jnp.int32)  # [max_n, 2]
-    target_pos = state.positions[target_type_idx]              # [max_n, 2]
     target_alive = state.alive[target_type_idx]     # [max_n]
     any_target_alive = jnp.any(target_alive)
 
     # Distance field: [H, W] Manhattan distance to nearest alive target
-    dist_field = _manhattan_distance_field(target_pos, target_alive, height, width)
+    if dist_field is None:
+        target_pos = state.positions[target_type_idx]  # [max_n, 2]
+        dist_field = _manhattan_distance_field(target_pos, target_alive, height, width)
 
     # For each chaser, look up distance at each neighbor direction
     r = jnp.clip(chaser_pos[:, 0], 0, height - 1)
@@ -163,7 +163,7 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
     delta = DIRECTION_DELTAS[best_dir]
 
     # If no targets alive, pick random direction
-    rand_dirs = jax.random.randint(key, (chaser_pos.shape[0],), 0, 4)
+    rand_dirs = jax.random.randint(key, (chaser_pos.shape[0],), 0, N_DIRECTIONS)
     rand_delta = DIRECTION_DELTAS[rand_dirs]
     delta = jnp.where(any_target_alive, delta, rand_delta)
 
@@ -171,12 +171,7 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
     new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     new_ori = jnp.where(can_move[:, None], delta, state.orientations[type_idx])
-    return state.replace(
-        positions=state.positions.at[type_idx].set(new_pos),
-        cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
-        orientations=state.orientations.at[type_idx].set(new_ori),
-        rng=rng,
-    )
+    return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng)
 
 
 def spawn_sprite(state: GameState, spawner_type, spawner_idx, target_type,
@@ -318,7 +313,7 @@ def update_random_inertial(state: GameState, type_idx, mass, strength):
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
 
-    dir_indices = jax.random.randint(key, (max_n,), 0, 4)
+    dir_indices = jax.random.randint(key, (max_n,), 0, N_DIRECTIONS)
     force = DIRECTION_DELTAS[dir_indices] * strength  # [max_n, 2]
 
     vel = state.velocities[type_idx]
