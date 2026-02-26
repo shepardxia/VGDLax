@@ -91,10 +91,12 @@ def update_random_npc(state: GameState, type_idx, cooldown):
     max_n = state.alive.shape[1]
     dir_indices = jax.random.randint(key, (max_n,), 0, 4)
     deltas = DIRECTION_DELTAS[dir_indices]
-    new_pos, new_timers, _ = _move_with_cooldown(state, type_idx, cooldown, deltas=deltas)
+    new_pos, new_timers, can_move = _move_with_cooldown(state, type_idx, cooldown, deltas=deltas)
+    new_ori = jnp.where(can_move[:, None], deltas, state.orientations[type_idx])
     return state.replace(
         positions=state.positions.at[type_idx].set(new_pos),
         cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
+        orientations=state.orientations.at[type_idx].set(new_ori),
         rng=rng,
     )
 
@@ -168,9 +170,11 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
     speed = state.speeds[type_idx]  # [max_n] float32
     new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
+    new_ori = jnp.where(can_move[:, None], delta, state.orientations[type_idx])
     return state.replace(
         positions=state.positions.at[type_idx].set(new_pos),
         cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
+        orientations=state.orientations.at[type_idx].set(new_ori),
         rng=rng,
     )
 
@@ -183,12 +187,18 @@ def spawn_sprite(state: GameState, spawner_type, spawner_idx, target_type,
     slot = jnp.argmax(available)
     has_slot = available[slot]
     state = state.replace(
-        alive=state.alive.at[target_type, slot].set(has_slot),
-        positions=state.positions.at[target_type, slot].set(pos),
-        orientations=state.orientations.at[target_type, slot].set(orientation),
-        speeds=state.speeds.at[target_type, slot].set(speed),
-        ages=state.ages.at[target_type, slot].set(0),
-        cooldown_timers=state.cooldown_timers.at[target_type, slot].set(0),
+        alive=state.alive.at[target_type, slot].set(
+            state.alive[target_type, slot] | has_slot),
+        positions=state.positions.at[target_type, slot].set(
+            jnp.where(has_slot, pos, state.positions[target_type, slot])),
+        orientations=state.orientations.at[target_type, slot].set(
+            jnp.where(has_slot, orientation, state.orientations[target_type, slot])),
+        speeds=state.speeds.at[target_type, slot].set(
+            jnp.where(has_slot, speed, state.speeds[target_type, slot])),
+        ages=state.ages.at[target_type, slot].set(
+            jnp.where(has_slot, 0, state.ages[target_type, slot])),
+        cooldown_timers=state.cooldown_timers.at[target_type, slot].set(
+            jnp.where(has_slot, 0, state.cooldown_timers[target_type, slot])),
     )
     return state
 

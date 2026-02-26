@@ -179,7 +179,8 @@ def test_initial_frame_matches(game_name):
     pyvgdl_img = _render_pyvgdl(pyvgdl_env)
 
     compiled, state, gd = _setup_jax(game_name)
-    jax_img = render_pygame(state, gd, BLOCK_SIZE, render_sprites=False)
+    jax_img = render_pygame(state, gd, BLOCK_SIZE, render_sprites=False,
+                           static_grid_map=compiled.static_grid_map)
 
     _compare_frames(pyvgdl_img, jax_img, step_num=0)
 
@@ -213,7 +214,8 @@ def test_action_sequence_chase():
             break
 
         pyvgdl_img = _render_pyvgdl(pyvgdl_env)
-        jax_img = render_pygame(state, gd, BLOCK_SIZE, render_sprites=False)
+        jax_img = render_pygame(state, gd, BLOCK_SIZE, render_sprites=False,
+                           static_grid_map=compiled.static_grid_map)
         _compare_frames(pyvgdl_img, jax_img, step_num=step_i + 1)
 
 
@@ -225,7 +227,8 @@ def test_frame_shapes_match(game_name):
     pyvgdl_img = _render_pyvgdl(pyvgdl_env)
 
     compiled, state, gd = _setup_jax(game_name)
-    jax_img = render_pygame(state, gd, BLOCK_SIZE, render_sprites=False)
+    jax_img = render_pygame(state, gd, BLOCK_SIZE, render_sprites=False,
+                           static_grid_map=compiled.static_grid_map)
 
     assert pyvgdl_img.shape == jax_img.shape, (
         f"Shape mismatch: py-vgdl {pyvgdl_img.shape} vs jax {jax_img.shape}"
@@ -277,6 +280,7 @@ def test_initial_frame_with_sprites_matches(game_name):
     compiled = compile_game(gd, max_sprites_per_type=max_n)
     state = compiled.init_state.replace(rng=jax.random.PRNGKey(42))
 
-    jax_img = render_pygame(state, gd, BLOCK_SIZE, render_sprites=True)
+    jax_img = render_pygame(state, gd, BLOCK_SIZE, render_sprites=True,
+                           static_grid_map=compiled.static_grid_map)
 
     _compare_frames(pyvgdl_img, jax_img, step_num=0)

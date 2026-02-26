@@ -27,15 +27,6 @@ from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES
 # Mapping from JAX dir index → BASEDIRS index:
 JAX_TO_BASEDIRS = {0: 0, 1: 2, 2: 1, 3: 3}
 
-# Sprite classes that consume RNG during NPC update
-_RNG_NPC_CLASSES = {
-    SpriteClass.RANDOM_NPC,
-    SpriteClass.CHASER,
-    SpriteClass.FLEEING,
-    SpriteClass.SPAWN_POINT,
-    SpriteClass.BOMBER,
-}
-
 
 class RNGRecorder:
     """Eagerly replay vgdl-jax's RNG sequence to record all random draws.

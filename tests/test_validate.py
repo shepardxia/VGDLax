@@ -7,7 +7,7 @@ import os
 import pytest
 import numpy as np
 
-from vgdl_jax.validate.constants import GAMES_DIR, ALL_GAMES, DETERMINISTIC_GAMES, STOCHASTIC_GAMES
+from vgdl_jax.validate.constants import GAMES_DIR, ALL_GAMES, DETERMINISTIC_GAMES, STOCHASTIC_GAMES, BLOCK_SIZE
 from vgdl_jax.validate.harness import (
     validate_pyvgdl_loads,
     validate_pyvgdl_state_extraction,
@@ -20,7 +20,6 @@ from vgdl_jax.validate.harness import (
     setup_jax_game,
     get_sprite_configs,
     get_effects,
-    BLOCK_SIZE,
 )
 from vgdl_jax.validate.state_extractor import extract_pyvgdl_state
 

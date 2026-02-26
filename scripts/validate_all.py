@@ -21,14 +21,10 @@ import sys
 import time
 import traceback
 
-import numpy as np
-
 from vgdl_jax.validate.constants import ALL_GAMES
 from vgdl_jax.validate.harness import (
     run_comparison,
-    compare_states,
     setup_jax_game,
-    setup_pyvgdl_game,
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -434,17 +430,20 @@ def _render_jax_frames(game_name, actions, seed=42, block_size=24):
     from vgdl_jax.render import render_pygame
 
     compiled, game_def = setup_jax_game(game_name)
+    sgm = compiled.static_grid_map
     state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
     step_fn = compiled.step_fn
 
     frames = []
-    frames.append((0, render_pygame(state, game_def, block_size, render_sprites=False)))
+    frames.append((0, render_pygame(state, game_def, block_size,
+                                     render_sprites=False, static_grid_map=sgm)))
 
     for i, a in enumerate(actions):
         if bool(state.done):
             break
         state = step_fn(state, a)
-        frames.append((i + 1, render_pygame(state, game_def, block_size, render_sprites=False)))
+        frames.append((i + 1, render_pygame(state, game_def, block_size,
+                                             render_sprites=False, static_grid_map=sgm)))
 
     return frames
 

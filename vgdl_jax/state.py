@@ -15,6 +15,7 @@ class GameState:
     resources: jnp.ndarray       # [n_types, max_n, n_resource_types] int32
     velocities: jnp.ndarray      # [n_types, max_n, 2] float32
     passive_forces: jnp.ndarray  # [n_types, max_n, 2] float32
+    static_grids: jnp.ndarray   # [n_static_types, height, width] bool
     score: jnp.int32
     step_count: jnp.int32
     done: jnp.bool_
@@ -23,10 +24,12 @@ class GameState:
 
 
 def create_initial_state(n_types, max_n, height, width,
-                         n_resource_types=0, rng_key=None):
+                         n_resource_types=0, n_static_types=0,
+                         rng_key=None):
     if rng_key is None:
         rng_key = jax.random.PRNGKey(0)
     n_res = max(n_resource_types, 1)  # at least 1 to keep shape valid
+    n_static = max(n_static_types, 1)  # at least 1 to keep shape valid
     return GameState(
         positions=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
         alive=jnp.zeros((n_types, max_n), dtype=jnp.bool_),
@@ -38,6 +41,7 @@ def create_initial_state(n_types, max_n, height, width,
         resources=jnp.zeros((n_types, max_n, n_res), dtype=jnp.int32),
         velocities=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
         passive_forces=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
+        static_grids=jnp.zeros((n_static, height, width), dtype=jnp.bool_),
         score=jnp.int32(0),
         step_count=jnp.int32(0),
         done=jnp.bool_(False),

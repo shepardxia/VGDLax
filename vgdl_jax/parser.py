@@ -427,35 +427,9 @@ def _build_effect_def(actor, actee, effect_name, kwargs):
     et = VGDL_TO_KEY.get(effect_name, 'null')
     score_change = int(kwargs.get('scoreChange', 0))
 
-    # Pass through relevant kwargs for each effect type
-    eff_kwargs = {}
-    if et == 'transform_to' and 'stype' in kwargs:
-        eff_kwargs['stype'] = kwargs['stype']
-    elif et == 'change_resource':
-        if 'resource' in kwargs:
-            eff_kwargs['resource'] = kwargs['resource']
-        if 'value' in kwargs:
-            eff_kwargs['value'] = int(kwargs['value'])
-    elif et == 'collect_resource':
-        pass  # resolved at compile time from the Resource SpriteDef
-    elif et in ('kill_if_has_less', 'kill_if_has_more'):
-        if 'resource' in kwargs:
-            eff_kwargs['resource'] = kwargs['resource']
-        if 'limit' in kwargs:
-            eff_kwargs['limit'] = int(kwargs['limit'])
-    elif et in ('kill_if_other_has_more', 'kill_if_other_has_less'):
-        if 'resource' in kwargs:
-            eff_kwargs['resource'] = kwargs['resource']
-        if 'limit' in kwargs:
-            eff_kwargs['limit'] = int(kwargs['limit'])
-    elif et == 'teleport_to_exit':
-        pass  # resolved at compile time from portal's stype
-    elif et == 'kill_if_slow':
-        if 'limitspeed' in kwargs:
-            eff_kwargs['limitspeed'] = float(kwargs['limitspeed'])
-    elif et in ('wall_stop', 'wall_bounce', 'bounce_direction'):
-        if 'friction' in kwargs:
-            eff_kwargs['friction'] = float(kwargs['friction'])
+    # Pass through all kwargs except scoreChange — let _compile_effect_kwargs
+    # select what it needs for each effect type.
+    eff_kwargs = {k: v for k, v in kwargs.items() if k != 'scoreChange'}
 
     return EffectDef(
         effect_type=et,

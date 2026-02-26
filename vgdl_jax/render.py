@@ -96,7 +96,7 @@ def _apply_rotation(img, orientation):
 
 
 def render_pygame(state, game_def, block_size, sprites_path=None,
-                  render_sprites=True):
+                  render_sprites=True, static_grid_map=None):
     """
     Pygame-exact renderer. Matches py-vgdl's rendering output.
 
@@ -110,6 +110,7 @@ def render_pygame(state, game_def, block_size, sprites_path=None,
             If None, auto-discovers ../../py-vgdl/vgdl/sprites/ relative to this file.
         render_sprites: if False, always draw solid color rectangles (no images).
             Useful for cross-engine validation against color-only renderers.
+        static_grid_map: dict mapping type_idx → static_grid_idx, or None
 
     Returns:
         [H*block_size, W*block_size, 3] uint8 numpy array
@@ -122,6 +123,8 @@ def render_pygame(state, game_def, block_size, sprites_path=None,
     W = game_def.level.width
     screen_h = H * block_size
     screen_w = W * block_size
+    if static_grid_map is None:
+        static_grid_map = {}
 
     # Auto-discover sprites_path (only if sprite rendering is enabled)
     if render_sprites and sprites_path is None:
@@ -148,30 +151,47 @@ def render_pygame(state, game_def, block_size, sprites_path=None,
     positions = np.asarray(state.positions)      # [n_types, max_n, 2]
     alive = np.asarray(state.alive)              # [n_types, max_n]
     orientations = np.asarray(state.orientations)  # [n_types, max_n, 2]
+    static_grids = np.asarray(state.static_grids)  # [n_static, H, W]
 
     sprite_cache = {}
 
     # Draw sprites in type order (z-order: definition order in SpriteSet)
     for sd in game_def.sprites:
         t = sd.type_idx
-        for i in range(alive.shape[1]):
-            if not alive[t, i]:
-                continue
-            row, col = round(float(positions[t, i, 0])), round(float(positions[t, i, 1]))
-            # Skip out-of-bounds sprites
-            if row < 0 or row >= H or col < 0 or col >= W:
-                continue
+        if t in static_grid_map:
+            # Draw from static grid
+            sg_idx = static_grid_map[t]
+            grid = static_grids[sg_idx]
+            for row in range(H):
+                for col in range(W):
+                    if not grid[row, col]:
+                        continue
+                    sprite_rect = _calculate_render_rect(
+                        row, col, block_size, sd.shrinkfactor)
+                    if sd.img is not None and sprites_path is not None:
+                        img = _load_sprite(sd.img, block_size, sd.shrinkfactor,
+                                           sprites_path, sprite_cache)
+                        surface.blit(img, sprite_rect)
+                    else:
+                        surface.fill(sd.color, sprite_rect)
+        else:
+            for i in range(alive.shape[1]):
+                if not alive[t, i]:
+                    continue
+                row, col = round(float(positions[t, i, 0])), round(float(positions[t, i, 1]))
+                if row < 0 or row >= H or col < 0 or col >= W:
+                    continue
 
-            sprite_rect = _calculate_render_rect(row, col, block_size, sd.shrinkfactor)
+                sprite_rect = _calculate_render_rect(row, col, block_size, sd.shrinkfactor)
 
-            if sd.img is not None and sprites_path is not None:
-                img = _load_sprite(sd.img, block_size, sd.shrinkfactor,
-                                   sprites_path, sprite_cache)
-                ori = orientations[t, i]
-                img = _apply_rotation(img, (float(ori[0]), float(ori[1])))
-                surface.blit(img, sprite_rect)
-            else:
-                surface.fill(sd.color, sprite_rect)
+                if sd.img is not None and sprites_path is not None:
+                    img = _load_sprite(sd.img, block_size, sd.shrinkfactor,
+                                       sprites_path, sprite_cache)
+                    ori = orientations[t, i]
+                    img = _apply_rotation(img, (float(ori[0]), float(ori[1])))
+                    surface.blit(img, sprite_rect)
+                else:
+                    surface.fill(sd.color, sprite_rect)
 
     # Convert to numpy array (same transform as py-vgdl's get_image())
     img = np.flipud(np.rot90(

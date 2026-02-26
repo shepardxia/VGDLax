@@ -71,33 +71,48 @@ def extract_pyvgdl_state(game, sprite_key_order, block_size=10):
     }
 
 
-def extract_jax_state(state, game_def):
+def extract_jax_state(state, game_def, static_grid_map=None):
     """Extract state from a vgdl-jax GameState into the same normalized dict.
 
     Args:
         state: GameState (flax.struct.dataclass)
         game_def: GameDef from parser
+        static_grid_map: dict mapping type_idx → static_grid_idx, or None
 
     Returns:
         Same dict format as extract_pyvgdl_state.
     """
+    import numpy as np
+    if static_grid_map is None:
+        static_grid_map = {}
+    static_grids = np.asarray(state.static_grids)
     types = {}
 
     for sd in game_def.sprites:
         type_idx = sd.type_idx
-        alive_mask = state.alive[type_idx]
-        n_alive = int(alive_mask.sum())
 
-        positions = []
-        orientations = []
-        for slot in range(alive_mask.shape[0]):
-            if alive_mask[slot]:
-                row = float(state.positions[type_idx, slot, 0])
-                col = float(state.positions[type_idx, slot, 1])
-                positions.append((row, col))
-                ori_row = float(state.orientations[type_idx, slot, 0])
-                ori_col = float(state.orientations[type_idx, slot, 1])
-                orientations.append((ori_row, ori_col))
+        if type_idx in static_grid_map:
+            # Reconstruct positions from static grid
+            sg_idx = static_grid_map[type_idx]
+            grid = static_grids[sg_idx]
+            coords = np.argwhere(grid)  # [N, 2] of (row, col)
+            n_alive = len(coords)
+            positions = [(float(r), float(c)) for r, c in coords]
+            # Static types have default orientation (from SpriteDef)
+            orientations = [tuple(float(x) for x in sd.orientation)] * n_alive
+        else:
+            alive_mask = state.alive[type_idx]
+            n_alive = int(alive_mask.sum())
+            positions = []
+            orientations = []
+            for slot in range(alive_mask.shape[0]):
+                if alive_mask[slot]:
+                    row = float(state.positions[type_idx, slot, 0])
+                    col = float(state.positions[type_idx, slot, 1])
+                    positions.append((row, col))
+                    ori_row = float(state.orientations[type_idx, slot, 0])
+                    ori_col = float(state.orientations[type_idx, slot, 1])
+                    orientations.append((ori_row, ori_col))
 
         positions.sort()
         orientations.sort()

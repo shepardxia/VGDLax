@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 
 from vgdl_jax.data_model import (
-    GameDef, SpriteClass, TerminationType, PHYSICS_SCALE,
+    GameDef, SpriteClass, TerminationType, PHYSICS_SCALE, STATIC_CLASSES,
 )
 from vgdl_jax.state import GameState, create_initial_state
 from vgdl_jax.step import build_step_fn
@@ -27,6 +27,7 @@ class CompiledGame:
     n_actions: int
     noop_action: int
     game_def: GameDef
+    static_grid_map: dict  # type_idx → static_grid_idx (empty if no static types)
 
 
 # Avatar type → (n_move_actions, can_shoot)
@@ -100,28 +101,104 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
 
     n_resource_types = len(resource_limits)
 
-    # Auto-compute max_n from level sprite counts + headroom
+    # ── 0c. Identify static types ────────────────────────────────────────
+    # A type is "static" if: sprite class is non-moving, speed == 0,
+    # NOT a spawn/transform target, and NOT type_a in position-modifying effects.
+    spawn_targets = set()
+    for ed in game_def.effects:
+        if ed.effect_type in ('transform_to', 'transform_others_to',
+                               'spawn_if_has_more', 'clone_sprite'):
+            stype = ed.kwargs.get('stype', '') or ed.kwargs.get('target', '')
+            for idx in game_def.resolve_stype(stype):
+                spawn_targets.add(idx)
+    for sd in game_def.sprites:
+        if sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER,
+                                SpriteClass.SPREADER):
+            if sd.spawner_stype:
+                for idx in game_def.resolve_stype(sd.spawner_stype):
+                    spawn_targets.add(idx)
+
+    # Types that are type_a in force-move or state-modifying effects can't be static.
+    # Revert-only effects (step_back, wall_stop, etc.) are safe for speed=0 types
+    # because the sprite never moves → revert is a no-op.
+    FORCE_MOVE_EFFECTS = {
+        'bounce_forward', 'pull_with_it', 'convey_sprite',
+        'wind_gust', 'slip_forward', 'teleport_to_exit', 'wrap_around',
+    }
+    MODIFY_TYPE_A_EFFECTS = {
+        'transform_to', 'clone_sprite', 'change_resource',
+    }
+    DISQUALIFYING_EFFECTS = FORCE_MOVE_EFFECTS | MODIFY_TYPE_A_EFFECTS
+    position_modified_types = set()
+    for ed in game_def.effects:
+        if ed.effect_type in DISQUALIFYING_EFFECTS:
+            for idx in game_def.resolve_stype(ed.actor_stype):
+                position_modified_types.add(idx)
+
+    # Portals are in STATIC_CLASSES for NPC update skip, but teleport_to_exit
+    # reads their positions from arrays, so exclude from static grid storage.
+    STATIC_GRID_CLASSES = STATIC_CLASSES - {SpriteClass.PORTAL}
+
+    # Also exclude types used as exit targets in teleport effects
+    teleport_exit_types = set()
+    for ed in game_def.effects:
+        if ed.effect_type == 'teleport_to_exit':
+            actee_indices = game_def.resolve_stype(ed.actee_stype)
+            for aidx in actee_indices:
+                portal_sd = game_def.sprites[aidx]
+                if portal_sd.portal_exit_stype:
+                    for eidx in game_def.resolve_stype(portal_sd.portal_exit_stype):
+                        teleport_exit_types.add(eidx)
+
+    static_type_indices = []  # ordered list of type_idx that are static
+    static_type_set = set()
+    for sd in game_def.sprites:
+        if (sd.sprite_class in STATIC_GRID_CLASSES
+                and sd.speed == 0
+                and sd.type_idx not in spawn_targets
+                and sd.type_idx not in position_modified_types
+                and sd.type_idx not in teleport_exit_types):
+            static_type_indices.append(sd.type_idx)
+            static_type_set.add(sd.type_idx)
+
+    static_grid_map = {ti: i for i, ti in enumerate(static_type_indices)}
+    n_static = len(static_type_indices)
+
+    # Auto-compute per-type max_n from level sprite counts + headroom
     if max_sprites_per_type is None:
         active_types = _find_active_types(game_def, avatar_sd)
         counts = defaultdict(int)
         for type_idx, _, _ in game_def.level.initial_sprites:
             counts[type_idx] += 1
-        # Only count active types for max_n sizing
-        active_counts = [counts.get(idx, 0) for idx in active_types
-                         if idx in counts]
-        max_n = max(active_counts, default=1) + 10
+        HEADROOM = 10
+        type_max_n = []
+        for idx in range(n_types):
+            if idx in static_type_set:
+                type_max_n.append(0)
+            else:
+                base = counts.get(idx, 0)
+                type_max_n.append(max(base + HEADROOM, HEADROOM) if idx in active_types else 1)
+        max_n = max(type_max_n)
         max_n = max(max_n, 10)
     else:
         max_n = max_sprites_per_type
+        type_max_n = [max_n] * n_types
 
     # ── 1. Build initial state ─────────────────────────────────────────
     state = create_initial_state(n_types=n_types, max_n=max_n,
                                  height=height, width=width,
-                                 n_resource_types=n_resource_types)
+                                 n_resource_types=n_resource_types,
+                                 n_static_types=n_static)
 
-    # Place sprites from level
+    # Place sprites from level: static types go into grids, others into arrays
+    import numpy as np
+    static_grid_data = np.zeros((max(n_static, 1), height, width), dtype=bool)
     slot_counts = defaultdict(int)
     for type_idx, row, col in game_def.level.initial_sprites:
+        if type_idx in static_type_set:
+            sg_idx = static_grid_map[type_idx]
+            static_grid_data[sg_idx, row, col] = True
+            continue
         slot = slot_counts[type_idx]
         if slot >= max_n:
             continue
@@ -138,6 +215,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                 jnp.int32(0)),
         )
         slot_counts[type_idx] += 1
+    state = state.replace(static_grids=jnp.array(static_grid_data))
 
     # Randomize orientations for RandomMissile sprites
     rng = jax.random.PRNGKey(0)
@@ -262,6 +340,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     # Types with fractional speed also need AABB collision
     fractional_speed_types = {sd.type_idx for sd in game_def.sprites
                                if sd.speed != 1.0 and sd.speed > 0}
+    # Types with non-integer positions (continuous physics or fractional speed)
+    frac_or_cont = continuous_types | fractional_speed_types
     # Build speed lookup for sweep flag computation
     _speed_by_idx = {sd.type_idx: sd.speed for sd in game_def.sprites}
 
@@ -272,11 +352,15 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
 
         if is_eos:
             for ta_idx in actor_indices:
+                # EOS effects never involve static types (they check bounds)
                 compiled_effects.append(dict(
                     type_a=ta_idx,
                     is_eos=True,
                     effect_type=ed.effect_type,
                     score_change=ed.score_change,
+                    max_a=type_max_n[ta_idx],
+                    static_a_grid_idx=static_grid_map.get(ta_idx),
+                    static_b_grid_idx=None,
                     kwargs=_compile_effect_kwargs(
                         ed, game_def, resource_name_to_idx, resource_limits,
                         concrete_actor_idx=ta_idx,
@@ -288,18 +372,45 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                 for tb_idx in actee_indices:
                     speed_a = _speed_by_idx.get(ta_idx, 1.0)
                     speed_b = _speed_by_idx.get(tb_idx, 1.0)
+                    a_static = ta_idx in static_type_set
+                    b_static = tb_idx in static_type_set
+                    # Collision mode: static grid > sweep > expanded_grid > aabb > grid
+                    a_frac = ta_idx in frac_or_cont
+                    b_frac = tb_idx in frac_or_cont
+                    if a_static and b_static:
+                        # Both static — collision is compile-time constant, skip
+                        collision_mode = 'static_both'
+                    elif b_static:
+                        # type_b is a static grid — collision is a direct grid lookup
+                        if a_frac:
+                            collision_mode = 'static_b_expanded'
+                        else:
+                            collision_mode = 'static_b_grid'
+                    elif a_static:
+                        # type_a is a static grid
+                        collision_mode = 'static_a_grid'
+                    elif speed_a > 1.0 or speed_b > 1.0:
+                        collision_mode = 'sweep'
+                    elif a_frac and not b_frac:
+                        collision_mode = 'expanded_grid_a'
+                    elif b_frac and not a_frac:
+                        collision_mode = 'expanded_grid_b'
+                    elif a_frac and b_frac:
+                        collision_mode = 'aabb'
+                    else:
+                        collision_mode = 'grid'
                     compiled_effects.append(dict(
                         type_a=ta_idx,
                         type_b=tb_idx,
                         is_eos=False,
                         effect_type=ed.effect_type,
                         score_change=ed.score_change,
-                        use_aabb=(ta_idx in continuous_types or
-                                  tb_idx in continuous_types or
-                                  ta_idx in fractional_speed_types or
-                                  tb_idx in fractional_speed_types),
-                        needs_sweep=(speed_a > 1.0 or speed_b > 1.0),
+                        collision_mode=collision_mode,
                         max_speed_cells=max(1, math.ceil(max(speed_a, speed_b))),
+                        max_a=type_max_n[ta_idx],
+                        max_b=type_max_n[tb_idx],
+                        static_a_grid_idx=static_grid_map.get(ta_idx),
+                        static_b_grid_idx=static_grid_map.get(tb_idx),
                         kwargs=_compile_effect_kwargs(
                             ed, game_def, resource_name_to_idx, resource_limits,
                             concrete_actor_idx=ta_idx, concrete_actee_idx=tb_idx,
@@ -312,19 +423,27 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         if td.term_type == TerminationType.SPRITE_COUNTER:
             stype = td.kwargs.get('stype', '')
             indices = game_def.resolve_stype(stype)
+            # Split into dynamic (alive array) and static (grid) indices
+            dyn_idx = [i for i in indices if i not in static_type_set]
+            sg_idx = [static_grid_map[i] for i in indices if i in static_type_set]
             limit = td.kwargs.get('limit', 0)
             win = td.win
-            check_fn = lambda s, _idx=indices, _lim=limit, _win=win: \
-                check_sprite_counter(s, _idx, _lim, _win)
+            check_fn = lambda s, _di=dyn_idx, _si=sg_idx, _lim=limit, _win=win: \
+                check_sprite_counter(s, _di, _lim, _win, _si)
             compiled_terminations.append((check_fn, td.score_change))
 
         elif td.term_type == TerminationType.MULTI_SPRITE_COUNTER:
             stypes_list = td.kwargs.get('stypes', [])
             indices_list = [game_def.resolve_stype(st) for st in stypes_list]
+            # Split each stype group into dynamic and static
+            dyn_indices_list = [[i for i in grp if i not in static_type_set]
+                                for grp in indices_list]
+            sg_indices_list = [[static_grid_map[i] for i in grp if i in static_type_set]
+                               for grp in indices_list]
             limit = td.kwargs.get('limit', 0)
             win = td.win
-            check_fn = lambda s, _idxs=indices_list, _lim=limit, _win=win: \
-                check_multi_sprite_counter(s, _idxs, _lim, _win)
+            check_fn = lambda s, _di=dyn_indices_list, _si=sg_indices_list, _lim=limit, _win=win: \
+                check_multi_sprite_counter(s, _di, _lim, _win, _si)
             compiled_terminations.append((check_fn, td.score_change))
 
         elif td.term_type == TerminationType.RESOURCE_COUNTER:
@@ -371,6 +490,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         n_actions=n_actions,
         noop_action=noop_action,
         game_def=game_def,
+        static_grid_map=static_grid_map,
     )
 
 

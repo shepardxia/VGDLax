@@ -13,10 +13,10 @@ Validation levels (inspired by PuzzleJAX validate_sols.py):
 """
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 
-from .constants import GAMES_DIR, BLOCK_SIZE
+from .constants import GAMES_DIR
 
 # Ensure py-vgdl is importable (needed by setup_pyvgdl_game)
 _PYVGDL_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'py-vgdl')
@@ -297,16 +297,17 @@ def run_jax_trajectory(game_name, actions, seed=42):
     from .state_extractor import extract_jax_state
 
     compiled, game_def = setup_jax_game(game_name)
+    sgm = compiled.static_grid_map
     state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
 
     # Initial state
-    states = [extract_jax_state(state, game_def)]
+    states = [extract_jax_state(state, game_def, static_grid_map=sgm)]
 
     for action_idx in actions:
         if bool(state.done):
             break
         state = compiled.step_fn(state, action_idx)
-        states.append(extract_jax_state(state, game_def))
+        states.append(extract_jax_state(state, game_def, static_grid_map=sgm))
 
     return states
 
@@ -330,6 +331,7 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
 
     # ── Set up JAX side ──
     compiled, game_def = setup_jax_game(game_name)
+    sgm = compiled.static_grid_map
     jax_state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
 
     # ── Set up py-vgdl side ──
@@ -355,7 +357,7 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
 
     # ── Compare initial state ──
     pv_state = extract_pyvgdl_state(game, sprite_key_order, block_size)
-    jx_state = extract_jax_state(jax_state, game_def)
+    jx_state = extract_jax_state(jax_state, game_def, static_grid_map=sgm)
     matches, diffs = compare_states(pv_state, jx_state)
 
     step_comparisons = [StepComparison(
@@ -394,7 +396,7 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
             game.tick(action_keys[action_idx])
 
         pv_state = extract_pyvgdl_state(game, sprite_key_order, block_size)
-        jx_state = extract_jax_state(jax_state, game_def)
+        jx_state = extract_jax_state(jax_state, game_def, static_grid_map=sgm)
         matches, diffs = compare_states(pv_state, jx_state)
 
         step_comparisons.append(StepComparison(
@@ -484,7 +486,7 @@ def get_effects(compiled):
                     type_a=ta_idx,
                     type_b=-1,
                     is_eos=True,
-                    effect_type=_effect_type_to_str(ed.effect_type),
+                    effect_type=ed.effect_type,
                     score_change=ed.score_change,
                     kwargs=dict(ed.kwargs),
                 ))
@@ -496,7 +498,7 @@ def get_effects(compiled):
                         type_a=ta_idx,
                         type_b=tb_idx,
                         is_eos=False,
-                        effect_type=_effect_type_to_str(ed.effect_type),
+                        effect_type=ed.effect_type,
                         score_change=ed.score_change,
                         kwargs=dict(ed.kwargs),
                     )
@@ -513,6 +515,3 @@ def get_effects(compiled):
     return effects
 
 
-def _effect_type_to_str(et):
-    """Identity — effect_type is already a string key."""
-    return et

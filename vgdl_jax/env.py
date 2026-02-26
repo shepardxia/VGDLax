@@ -37,6 +37,9 @@ class VGDLJaxEnv:
         self._n_types = n_types
         self.obs_shape = (n_types, self._height, self._width)
 
+        # Static grid map: type_idx → static_grid_idx
+        self._static_grid_map = self.compiled.static_grid_map
+
         # Build color table from sprite definitions
         self._colors = jnp.array(
             [sd.color for sd in game_def.sprites], dtype=jnp.uint8
@@ -62,11 +65,15 @@ class VGDLJaxEnv:
         grid = jnp.zeros((self._n_types, self._height, self._width),
                          dtype=jnp.bool_)
         for t in range(self._n_types):
-            pos = state.positions[t].astype(jnp.int32)
-            alive = state.alive[t]
-            row = jnp.clip(pos[:, 0], 0, self._height - 1)
-            col = jnp.clip(pos[:, 1], 0, self._width - 1)
-            grid = grid.at[t, row, col].set(grid[t, row, col] | alive)
+            if t in self._static_grid_map:
+                sg_idx = self._static_grid_map[t]
+                grid = grid.at[t].set(state.static_grids[sg_idx])
+            else:
+                pos = state.positions[t].astype(jnp.int32)
+                alive = state.alive[t]
+                row = jnp.clip(pos[:, 0], 0, self._height - 1)
+                col = jnp.clip(pos[:, 1], 0, self._width - 1)
+                grid = grid.at[t, row, col].max(alive)
         return grid
 
     def render(self, state, block_size=10):
