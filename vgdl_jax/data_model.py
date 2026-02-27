@@ -15,6 +15,23 @@ NOISY_AVATAR_NOISE_LEVEL = 0.4      # NoisyRotatingFlippingAvatar noise probabil
 GRAVITY_ACCEL = 1.0 / PHYSICS_SCALE  # standard gravity in grid-cell units
 SPRITE_HEADROOM = 10                 # extra slots per type beyond level count
 
+# Effects that modify sprite positions (used to determine occupancy-grid cache
+# safety in step.py and chaser-target stability in compiler.py).
+POSITION_MODIFYING_EFFECTS = frozenset({
+    'step_back', 'wall_stop', 'wall_bounce', 'bounce_direction',
+    'bounce_forward', 'pull_with_it', 'wrap_around', 'teleport_to_exit',
+    'convey_sprite', 'wind_gust', 'slip_forward', 'undo_all', 'turn_around',
+})
+
+# Effects that require per-pair partner identity (partner_idx) from collision.
+# All other effects use only the boolean collision mask.
+PARTNER_IDX_EFFECTS = frozenset({
+    'kill_both', 'kill_if_from_above',
+    'kill_if_other_has_more', 'kill_if_other_has_less',
+    'collect_resource', 'convey_sprite', 'wind_gust', 'attract_gaze',
+    'bounce_forward', 'pull_with_it',
+})
+
 
 class SpriteClass(enum.IntEnum):
     IMMOVABLE = 0

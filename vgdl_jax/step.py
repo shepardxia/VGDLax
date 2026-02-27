@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 from vgdl_jax.state import GameState
 from vgdl_jax.collision import detect_eos, in_bounds
-from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES, PHYSICS_SCALE, AABB_THRESHOLD
+from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES, AABB_THRESHOLD, POSITION_MODIFYING_EFFECTS, PARTNER_IDX_EFFECTS
 from vgdl_jax.effects import apply_masked_effect, apply_static_a_effect
 from vgdl_jax.sprites import (
     DIRECTION_DELTAS, spawn_sprite,
@@ -34,6 +34,18 @@ def _resolve_slices(state, max_a=None, max_b=None):
 def _pad_to_global(mask, eff_size, global_max_n):
     """Pad a sliced mask back to [global_max_n]."""
     return jnp.pad(mask, (0, global_max_n - eff_size))
+
+
+def _pad_partner_to_global(partner_idx, eff_a, global_max_n):
+    """Pad a sliced partner_idx array back to [global_max_n], filling with -1."""
+    if eff_a < global_max_n:
+        return jnp.concatenate([partner_idx, jnp.full(global_max_n - eff_a, -1, dtype=jnp.int32)])
+    return partner_idx
+
+
+def _no_partner(global_max_n):
+    """Return an all-(-1) partner_idx array (no partner information)."""
+    return jnp.full(global_max_n, -1, dtype=jnp.int32)
 
 
 def _fractional_neighbor_cells(pos, height, width):
@@ -106,17 +118,12 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
     # Pre-compute cache-safe types for occupancy grid caching.
     # A type_b grid can be cached if its positions never change during effect
     # dispatch (i.e., the type is never type_a in a position-modifying effect).
-    _POSITION_MODIFYING = frozenset({
-        'step_back', 'wall_stop', 'wall_bounce', 'bounce_direction',
-        'bounce_forward', 'pull_with_it', 'wrap_around', 'teleport_to_exit',
-        'convey_sprite', 'wind_gust', 'slip_forward', 'undo_all', 'turn_around',
-    })
     _pos_modified_types = set()
     _has_undo_all = False
     for eff in effects:
         if eff.effect_type == 'undo_all':
             _has_undo_all = True
-        if eff.effect_type in _POSITION_MODIFYING and not eff.is_eos:
+        if eff.effect_type in POSITION_MODIFYING_EFFECTS and not eff.is_eos:
             _pos_modified_types.add(eff.type_a)
     if _has_undo_all:
         _cache_safe_type_b = frozenset()
@@ -230,8 +237,14 @@ def _build_occupancy_grid(positions, alive, height, width):
 
 
 def _collision_mask(state, type_a, type_b, height, width,
-                    max_a=None, max_b=None, prebuilt_grid_b=None):
-    """Which type_a sprites overlap with any type_b sprite? Returns [global_max_n] bool."""
+                    max_a=None, max_b=None, prebuilt_grid_b=None,
+                    need_partner=True):
+    """Which type_a sprites overlap with any type_b sprite?
+
+    Returns (mask, partner_idx) where:
+      mask: [global_max_n] bool
+      partner_idx: [global_max_n] int32 — slot index of colliding type_b sprite (-1 if none)
+    """
     global_max_n, eff_a, eff_b = _resolve_slices(state, max_a, max_b)
 
     pos_a = state.positions[type_a, :eff_a].astype(jnp.int32)
@@ -248,21 +261,44 @@ def _collision_mask(state, type_a, type_b, height, width,
                 state.positions[type_b, :eff_b], state.alive[type_b, :eff_b],
                 height, width)
         mask = grid_b[r, c] & alive_a & in_bounds_a
+
+        if need_partner:
+            # Build slot grid: [H, W] int32, last-write-wins for slot index
+            pos_b = state.positions[type_b, :eff_b].astype(jnp.int32)
+            alive_b = state.alive[type_b, :eff_b]
+            ib_b = in_bounds(pos_b, height, width)
+            effective_b = alive_b & ib_b
+            r_b = jnp.clip(pos_b[:, 0], 0, height - 1)
+            c_b = jnp.clip(pos_b[:, 1], 0, width - 1)
+            slot_grid = jnp.full((height, width), -1, dtype=jnp.int32)
+            slot_indices = jnp.where(effective_b, jnp.arange(eff_b, dtype=jnp.int32), -1)
+            slot_grid = slot_grid.at[r_b, c_b].set(slot_indices)
+            pidx = jnp.where(mask, slot_grid[r, c], -1)
+        else:
+            pidx = jnp.full(eff_a, -1, dtype=jnp.int32)
     else:
         counts = jnp.zeros((height, width), dtype=jnp.int32)
         effective = alive_a & in_bounds_a
         counts = counts.at[r, c].add(effective.astype(jnp.int32))
         mask = (counts[r, c] > 1) & effective
+        # Self-collision: partner_idx is -1 (no specific partner)
+        pidx = jnp.full(eff_a, -1, dtype=jnp.int32)
 
-    return _pad_to_global(mask, eff_a, global_max_n)
+    return (_pad_to_global(mask, eff_a, global_max_n),
+            _pad_partner_to_global(pidx, eff_a, global_max_n))
 
 
 # ── AABB collision detection (for continuous physics) ─────────────────
 
 
 def _collision_mask_aabb(state, type_a, type_b, height, width,
-                         max_a=None, max_b=None):
-    """AABB overlap: two 1x1 sprites overlap when |pos_a - pos_b| < 1.0 on both axes."""
+                         max_a=None, max_b=None, need_partner=True):
+    """AABB overlap: two 1x1 sprites overlap when |pos_a - pos_b| < 1.0 on both axes.
+
+    Returns (mask, partner_idx) where:
+      mask: [global_max_n] bool
+      partner_idx: [global_max_n] int32 — slot index of first overlapping type_b sprite (-1 if none)
+    """
     global_max_n, eff_a, eff_b = _resolve_slices(state, max_a, max_b)
 
     pos_a = state.positions[type_a, :eff_a]    # [eff_a, 2] float32
@@ -278,7 +314,14 @@ def _collision_mask_aabb(state, type_a, type_b, height, width,
         overlap = overlap & ~jnp.eye(eff_a, dtype=jnp.bool_)
 
     mask = jnp.any(overlap, axis=1) & alive_a
-    return _pad_to_global(mask, eff_a, global_max_n)
+    if need_partner:
+        # Partner index: argmax of overlap gives first True along axis=1
+        # When no overlap, argmax returns 0 — use jnp.where to set to -1
+        pidx = jnp.where(mask, jnp.argmax(overlap.astype(jnp.int32), axis=1).astype(jnp.int32), -1)
+    else:
+        pidx = jnp.full(eff_a, -1, dtype=jnp.int32)
+    return (_pad_to_global(mask, eff_a, global_max_n),
+            _pad_partner_to_global(pidx, eff_a, global_max_n))
 
 
 # ── Sweep collision detection (for speed > 1) ─────────────────────────
@@ -306,8 +349,14 @@ def _build_swept_occupancy_grid(positions, prev_positions, alive,
 
 def _collision_mask_sweep(state, prev_positions, type_a, type_b,
                            height, width, max_speed_cells,
-                           max_a=None, max_b=None):
-    """Sweep collision: checks if type_a's path overlaps with type_b's path."""
+                           max_a=None, max_b=None, need_partner=True):
+    """Sweep collision: checks if type_a's path overlaps with type_b's path.
+
+    Returns (mask, partner_idx) where:
+      mask: [global_max_n] bool
+      partner_idx: [global_max_n] int32 — slot index of colliding type_b sprite at
+        type_a's current position (-1 if none)
+    """
     global_max_n, eff_a, eff_b = _resolve_slices(state, max_a, max_b)
 
     grid_b = _build_swept_occupancy_grid(
@@ -330,15 +379,40 @@ def _collision_mask_sweep(state, prev_positions, type_a, type_b,
 
     init_hit = jnp.zeros_like(alive_a)
     mask = jax.lax.fori_loop(0, max_speed_cells + 1, check_step, init_hit)
-    return _pad_to_global(mask, eff_a, global_max_n)
+
+    if need_partner:
+        # Build slot grid from type_b's current positions for partner lookup
+        pos_b = state.positions[type_b, :eff_b].astype(jnp.int32)
+        alive_b = state.alive[type_b, :eff_b]
+        ib_b = in_bounds(pos_b, height, width)
+        effective_b = alive_b & ib_b
+        r_b = jnp.clip(pos_b[:, 0], 0, height - 1)
+        c_b = jnp.clip(pos_b[:, 1], 0, width - 1)
+        slot_grid = jnp.full((height, width), -1, dtype=jnp.int32)
+        slot_indices = jnp.where(effective_b, jnp.arange(eff_b, dtype=jnp.int32), -1)
+        slot_grid = slot_grid.at[r_b, c_b].set(slot_indices)
+        r_a_clip = jnp.clip(ipos_a[:, 0], 0, height - 1)
+        c_a_clip = jnp.clip(ipos_a[:, 1], 0, width - 1)
+        pidx = jnp.where(mask, slot_grid[r_a_clip, c_a_clip], -1)
+    else:
+        pidx = jnp.full(eff_a, -1, dtype=jnp.int32)
+
+    return (_pad_to_global(mask, eff_a, global_max_n),
+            _pad_partner_to_global(pidx, eff_a, global_max_n))
 
 
 # ── Expanded grid collision (fractional vs integer) ────────────────────
 
 
 def _collision_mask_expanded_grid_a(state, type_a, type_b, height, width,
-                                     max_a, max_b, prebuilt_grid_b=None):
-    """Collision mask when type_a has fractional positions, type_b integer. O(max_a + max_b)."""
+                                     max_a, max_b, prebuilt_grid_b=None,
+                                     need_partner=True):
+    """Collision mask when type_a has fractional positions, type_b integer. O(max_a + max_b).
+
+    Returns (mask, partner_idx) where:
+      mask: [global_max_n] bool
+      partner_idx: [global_max_n] int32 — slot index of colliding type_b sprite (-1 if none)
+    """
     global_max_n, eff_a, eff_b = _resolve_slices(state, max_a, max_b)
 
     pos_a = state.positions[type_a, :eff_a]    # [eff_a, 2] float32
@@ -367,12 +441,35 @@ def _collision_mask_expanded_grid_a(state, type_a, type_b, height, width,
     hit = (check_cell(fr_c, fc_c) | check_cell(fr_c, cc_c) |
            check_cell(cr_c, fc_c) | check_cell(cr_c, cc_c))
     mask = hit & alive_a
-    return _pad_to_global(mask, eff_a, global_max_n)
+
+    if need_partner:
+        # Build slot grid from type_b integer positions
+        pos_b = state.positions[type_b, :eff_b].astype(jnp.int32)
+        alive_b = state.alive[type_b, :eff_b]
+        ib_b = in_bounds(pos_b, height, width)
+        effective_b = alive_b & ib_b
+        r_b = jnp.clip(pos_b[:, 0], 0, height - 1)
+        c_b = jnp.clip(pos_b[:, 1], 0, width - 1)
+        slot_grid = jnp.full((height, width), -1, dtype=jnp.int32)
+        slot_indices = jnp.where(effective_b, jnp.arange(eff_b, dtype=jnp.int32), -1)
+        slot_grid = slot_grid.at[r_b, c_b].set(slot_indices)
+        # Partner from floor cell (primary cell of fractional position)
+        pidx = jnp.where(mask, slot_grid[fr_c, fc_c], -1)
+    else:
+        pidx = jnp.full(eff_a, -1, dtype=jnp.int32)
+
+    return (_pad_to_global(mask, eff_a, global_max_n),
+            _pad_partner_to_global(pidx, eff_a, global_max_n))
 
 
 def _collision_mask_expanded_grid_b(state, type_a, type_b, height, width,
-                                     max_a, max_b):
-    """Collision mask when type_a has integer positions, type_b fractional. O(max_a + max_b)."""
+                                     max_a, max_b, need_partner=True):
+    """Collision mask when type_a has integer positions, type_b fractional. O(max_a + max_b).
+
+    Returns (mask, partner_idx) where:
+      mask: [global_max_n] bool
+      partner_idx: [global_max_n] int32 — slot index of colliding type_b sprite (-1 if none)
+    """
     global_max_n, eff_a, eff_b = _resolve_slices(state, max_a, max_b)
 
     pos_b = state.positions[type_b, :eff_b]    # [eff_b, 2] float32
@@ -405,7 +502,18 @@ def _collision_mask_expanded_grid_b(state, type_a, type_b, height, width,
     c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
     ib_a = in_bounds(ipos_a, height, width)
     mask = coll_grid[r_a, c_a] & alive_a & ib_a
-    return _pad_to_global(mask, eff_a, global_max_n)
+
+    if need_partner:
+        # Build slot grid from type_b's floor positions
+        slot_grid = jnp.full((height, width), -1, dtype=jnp.int32)
+        slot_indices = jnp.where(alive_b, jnp.arange(eff_b, dtype=jnp.int32), -1)
+        slot_grid = slot_grid.at[fr_c, fc_c].set(slot_indices)
+        pidx = jnp.where(mask, slot_grid[r_a, c_a], -1)
+    else:
+        pidx = jnp.full(eff_a, -1, dtype=jnp.int32)
+
+    return (_pad_to_global(mask, eff_a, global_max_n),
+            _pad_partner_to_global(pidx, eff_a, global_max_n))
 
 
 # ── Static grid collision detection ──────────────────────────────────
@@ -413,7 +521,12 @@ def _collision_mask_expanded_grid_b(state, type_a, type_b, height, width,
 
 def _collision_mask_static_b_grid(state, type_a, static_grid, height, width,
                                    max_a=None):
-    """Collision when type_b is a static grid, type_a has integer positions."""
+    """Collision when type_b is a static grid, type_a has integer positions.
+
+    Returns (mask, partner_idx) where:
+      mask: [global_max_n] bool
+      partner_idx: [global_max_n] int32 — always -1 (no slot info for static grids)
+    """
     global_max_n, eff_a, _ = _resolve_slices(state, max_a)
     pos_a = state.positions[type_a, :eff_a].astype(jnp.int32)
     alive_a = state.alive[type_a, :eff_a]
@@ -421,12 +534,18 @@ def _collision_mask_static_b_grid(state, type_a, static_grid, height, width,
     r = jnp.clip(pos_a[:, 0], 0, height - 1)
     c = jnp.clip(pos_a[:, 1], 0, width - 1)
     mask = static_grid[r, c] & alive_a & ib_a
-    return _pad_to_global(mask, eff_a, global_max_n)
+    return (_pad_to_global(mask, eff_a, global_max_n),
+            _no_partner(global_max_n))
 
 
 def _collision_mask_static_b_expanded(state, type_a, static_grid,
                                        height, width, max_a=None):
-    """Collision when type_b is a static grid, type_a has fractional positions."""
+    """Collision when type_b is a static grid, type_a has fractional positions.
+
+    Returns (mask, partner_idx) where:
+      mask: [global_max_n] bool
+      partner_idx: [global_max_n] int32 — always -1 (no slot info for static grids)
+    """
     global_max_n, eff_a, _ = _resolve_slices(state, max_a)
     pos_a = state.positions[type_a, :eff_a]
     alive_a = state.alive[type_a, :eff_a]
@@ -445,7 +564,8 @@ def _collision_mask_static_b_expanded(state, type_a, static_grid,
     hit = (check_cell(fr_c, fc_c) | check_cell(fr_c, cc_c) |
            check_cell(cr_c, fc_c) | check_cell(cr_c, cc_c))
     mask = hit & alive_a
-    return _pad_to_global(mask, eff_a, global_max_n)
+    return (_pad_to_global(mask, eff_a, global_max_n),
+            _no_partner(global_max_n))
 
 
 def _collision_grid_mask_static_a(state, static_grid, type_b,
@@ -508,6 +628,8 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                 continue
 
             # ── Collision detection (single dispatch chain) ──
+            need_partner = effect_type in PARTNER_IDX_EFFECTS
+
             # For grid/expanded_grid_a: reuse cached occupancy grid
             cached_grid_b = None
             if collision_mode in ('grid', 'expanded_grid_a') and type_a != type_b:
@@ -520,36 +642,41 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                     grid_cache[type_b] = cached_grid_b
 
             if collision_mode == 'static_b_grid':
-                coll_mask = _collision_mask_static_b_grid(
+                coll_mask, partner_idx = _collision_mask_static_b_grid(
                     state, type_a, state.static_grids[static_b_idx],
                     height, width, max_a=eff_max_a)
             elif collision_mode == 'static_b_expanded':
-                coll_mask = _collision_mask_static_b_expanded(
+                coll_mask, partner_idx = _collision_mask_static_b_expanded(
                     state, type_a, state.static_grids[static_b_idx],
                     height, width, max_a=eff_max_a)
             elif collision_mode == 'sweep':
-                coll_mask = _collision_mask_sweep(
+                coll_mask, partner_idx = _collision_mask_sweep(
                     state, prev_positions, type_a, type_b,
                     height, width, max_speed_cells,
-                    max_a=eff_max_a, max_b=eff_max_b)
+                    max_a=eff_max_a, max_b=eff_max_b,
+                    need_partner=need_partner)
             elif collision_mode == 'expanded_grid_a':
-                coll_mask = _collision_mask_expanded_grid_a(
+                coll_mask, partner_idx = _collision_mask_expanded_grid_a(
                     state, type_a, type_b, height, width,
                     eff_max_a, eff_max_b,
-                    prebuilt_grid_b=cached_grid_b)
+                    prebuilt_grid_b=cached_grid_b,
+                    need_partner=need_partner)
             elif collision_mode == 'expanded_grid_b':
-                coll_mask = _collision_mask_expanded_grid_b(
+                coll_mask, partner_idx = _collision_mask_expanded_grid_b(
                     state, type_a, type_b, height, width,
-                    eff_max_a, eff_max_b)
+                    eff_max_a, eff_max_b,
+                    need_partner=need_partner)
             elif collision_mode == 'aabb':
-                coll_mask = _collision_mask_aabb(
-                    state, type_a, type_b, height, width,
-                    max_a=eff_max_a, max_b=eff_max_b)
-            else:
-                coll_mask = _collision_mask(
+                coll_mask, partner_idx = _collision_mask_aabb(
                     state, type_a, type_b, height, width,
                     max_a=eff_max_a, max_b=eff_max_b,
-                    prebuilt_grid_b=cached_grid_b)
+                    need_partner=need_partner)
+            else:
+                coll_mask, partner_idx = _collision_mask(
+                    state, type_a, type_b, height, width,
+                    max_a=eff_max_a, max_b=eff_max_b,
+                    prebuilt_grid_b=cached_grid_b,
+                    need_partner=need_partner)
 
             # wallBounce once-per-step: skip sprites already bounced this step
             if effect_type == 'wall_bounce':
@@ -566,7 +693,8 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
             state = apply_masked_effect(
                 state, prev_positions, type_a, type_b, coll_mask,
                 effect_type, score_change, eff_kwargs, height, width, max_n,
-                max_a=eff_max_a, max_b=eff_max_b)
+                max_a=eff_max_a, max_b=eff_max_b,
+                partner_idx=partner_idx)
 
     return state
 

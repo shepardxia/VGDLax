@@ -1,11 +1,12 @@
-"""
-Effect handlers for the VGDL-JAX step function.
+"""Effect handlers for the VGDL-JAX step function.
 
 Each handler implements one collision effect (kill, transform, resource change,
 etc.). Handlers share a uniform keyword-argument interface — each declares the
 params it needs and absorbs the rest via **_.
 
 Sections:
+    - JAX Primitives (prim_*)
+    - Shared helpers
     - Kill / removal
     - Position and orientation
     - Resources
@@ -20,33 +21,71 @@ from vgdl_jax.collision import in_bounds, AABB_EPS
 from vgdl_jax.sprites import DIRECTION_DELTAS, prefix_sum_allocate
 
 
+# ── JAX Primitives ───────────────────────────────────────────────────
+
+def prim_kill(state, type_idx, mask):
+    """Kill sprites where mask is True."""
+    return state.replace(alive=state.alive.at[type_idx].set(state.alive[type_idx] & ~mask))
+
+
+def prim_kill_partner(state, type_b, partner_idx, actor_mask):
+    """Scatter-kill: kill type_b sprites that are partners of masked type_a sprites."""
+    max_b = state.alive.shape[1]
+    safe_idx = jnp.clip(partner_idx, 0, max_b - 1)
+    b_kill = jnp.zeros(max_b, dtype=jnp.bool_).at[safe_idx].max(actor_mask & (partner_idx >= 0))
+    return state.replace(alive=state.alive.at[type_b].set(state.alive[type_b] & ~b_kill))
+
+
+def prim_restore_pos(state, type_idx, mask, prev_positions):
+    """Restore positions from prev_positions where mask is True."""
+    new = jnp.where(mask[:, None], prev_positions[type_idx], state.positions[type_idx])
+    return state.replace(positions=state.positions.at[type_idx].set(new))
+
+
+def prim_move(state, type_idx, mask, delta):
+    """Add delta to positions where mask is True."""
+    new = state.positions[type_idx] + mask[:, None] * delta
+    return state.replace(positions=state.positions.at[type_idx].set(new))
+
+
+def prim_set_orientation(state, type_idx, mask, new_ori):
+    """Set orientations where mask is True."""
+    cur = state.orientations[type_idx]
+    new = jnp.where(mask[:, None], new_ori, cur)
+    return state.replace(orientations=state.orientations.at[type_idx].set(new))
+
+
+def prim_negate_orientation(state, type_idx, mask):
+    """Negate orientations where mask is True."""
+    cur = state.orientations[type_idx]
+    new = jnp.where(mask[:, None], -cur, cur)
+    return state.replace(orientations=state.orientations.at[type_idx].set(new))
+
+
+def prim_clear_static(state, sg_idx, clear_mask):
+    """Clear cells from a static grid."""
+    return state.replace(static_grids=state.static_grids.at[sg_idx].set(
+        state.static_grids[sg_idx] & ~clear_mask))
+
+
+def _with_score(state, score_delta):
+    """Add score_delta to state score."""
+    return state.replace(score=state.score + score_delta)
+
+
+def _partner_vals(field_slice, partner_idx):
+    """Safely index field_slice[partner_idx] with clipping. field_slice: [max_n, ...]"""
+    safe = jnp.clip(partner_idx, 0, field_slice.shape[0] - 1)
+    return field_slice[safe]
+
+
+def _partner_scatter_mask(actor_mask, partner_idx, max_b):
+    """Build [max_b] bool mask: True for type_b slots that are partners of masked actors."""
+    return jnp.zeros(max_b, dtype=jnp.bool_).at[jnp.clip(partner_idx, 0, max_b - 1)].max(
+        actor_mask & (partner_idx >= 0))
+
+
 # ── Shared helpers ──────────────────────────────────────────────────────
-
-
-def _get_partner_coords(state, type_b, height, width):
-    """Get int32 positions, clipped coords, and in-bounds mask for type_b sprites."""
-    ipos_b = state.positions[type_b].astype(jnp.int32)
-    r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-    c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-    in_bounds_b = in_bounds(ipos_b, height, width)
-    return ipos_b, r_b, c_b, in_bounds_b
-
-
-def _get_actor_coords(state, type_a, height, width):
-    """Get int32 positions and clipped coords for type_a sprites."""
-    ipos_a = state.positions[type_a].astype(jnp.int32)
-    r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-    c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
-    return ipos_a, r_a, c_a
-
-
-def _apply_conditional_kill(state, type_a, should_kill, score_change):
-    """Kill type_a sprites where should_kill is True, scoring per-sprite."""
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~should_kill),
-        score=state.score + should_kill.sum() * jnp.int32(score_change),
-    )
-
 
 def _nearest_partner(pos_a, state, type_b, eff_b):
     """Find nearest alive type_b sprite for each pos_a sprite. Returns [eff_a, 2] positions."""
@@ -59,133 +98,163 @@ def _nearest_partner(pos_a, state, type_b, eff_b):
     return pos_b[nearest_b]
 
 
-def _clear_static_cells(state, sg_idx, clear_mask):
-    """Clear cells from a static grid. Returns updated state."""
-    return state.replace(static_grids=state.static_grids.at[sg_idx].set(
-        state.static_grids[sg_idx] & ~clear_mask))
+def _fill_slots(state, target_type, source_mask, src_positions,
+                src_orientations=None, target_speed=None, reset_cooldown=False):
+    """Allocate dead slots in target_type and fill with source data."""
+    should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], source_mask)
+    src_pos = src_positions[src_idx]
+    state = state.replace(
+        alive=state.alive.at[target_type].set(state.alive[target_type] | should_fill),
+        positions=state.positions.at[target_type].set(
+            jnp.where(should_fill[:, None], src_pos, state.positions[target_type])),
+        ages=state.ages.at[target_type].set(
+            jnp.where(should_fill, 0, state.ages[target_type])),
+    )
+    if src_orientations is not None:
+        src_ori = src_orientations[src_idx]
+        state = state.replace(
+            orientations=state.orientations.at[target_type].set(
+                jnp.where(should_fill[:, None], src_ori, state.orientations[target_type])))
+    if target_speed is not None:
+        state = state.replace(
+            speeds=state.speeds.at[target_type].set(
+                jnp.where(should_fill, target_speed, state.speeds[target_type])))
+    if reset_cooldown:
+        state = state.replace(
+            cooldown_timers=state.cooldown_timers.at[target_type].set(
+                jnp.where(should_fill, 0, state.cooldown_timers[target_type])))
+    return state
 
 
 # ── Kill / removal ─────────────────────────────────────────────────────
 
-
 def kill_sprite(state, type_a, mask, score_delta, **_):
-    return state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~mask),
-        score=state.score + score_delta,
-    )
+    return _with_score(prim_kill(state, type_a, mask), score_delta)
 
 
-def kill_both(state, type_a, type_b, mask, score_delta, height, width, kwargs=None, **_):
-    state = state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~mask))
+def kill_both(state, type_a, type_b, mask, score_delta, height, width,
+              kwargs=None, partner_idx=None, **_):
+    state = prim_kill(state, type_a, mask)
     if kwargs is None:
         kwargs = {}
     static_b_grid_idx = kwargs.get('static_b_grid_idx')
-    if static_b_grid_idx is not None or type_b >= 0:
-        # Build collision grid from type_a positions (shared by both paths)
-        _, r_a, c_a = _get_actor_coords(state, type_a, height, width)
-        grid_coll = jnp.zeros((height, width), dtype=jnp.bool_)
-        grid_coll = grid_coll.at[r_a, c_a].max(mask)
-        if static_b_grid_idx is not None:
-            state = _clear_static_cells(state, static_b_grid_idx, grid_coll)
-        else:
-            _, r_b, c_b, in_bounds_b = _get_partner_coords(state, type_b, height, width)
-            mask_b = grid_coll[r_b, c_b] & state.alive[type_b] & in_bounds_b
-            state = state.replace(
-                alive=state.alive.at[type_b].set(state.alive[type_b] & ~mask_b))
-    return state.replace(score=state.score + score_delta)
-
-
-def kill_if_alive(state, **kwargs):
-    """Kill type_a if type_b is alive (collision mask already requires type_b alive)."""
-    return kill_sprite(state, **kwargs)
+    if static_b_grid_idx is not None:
+        ipos_a = state.positions[type_a].astype(jnp.int32)
+        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
+        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
+        grid_coll = jnp.zeros((height, width), dtype=jnp.bool_).at[r_a, c_a].max(mask)
+        state = prim_clear_static(state, static_b_grid_idx, grid_coll)
+    elif type_b >= 0:
+        state = prim_kill_partner(state, type_b, partner_idx, mask)
+    return _with_score(state, score_delta)
 
 
 def kill_if_slow(state, type_a, mask, score_change, kwargs, **_):
     limitspeed = kwargs.get('limitspeed', 0.0)
     should_kill = mask & (state.speeds[type_a] < limitspeed)
-    return _apply_conditional_kill(state, type_a, should_kill, score_change)
+    return _with_score(prim_kill(state, type_a, should_kill),
+                       should_kill.sum() * jnp.int32(score_change))
 
 
 def kill_others(state, type_a, mask, score_delta, kwargs, **_):
     kill_type = kwargs.get('kill_type_idx', -1)
     if kill_type >= 0:
-        any_collision = mask.any()
-        new_alive = jnp.where(any_collision,
-                               jnp.zeros_like(state.alive[kill_type]),
-                               state.alive[kill_type])
-        return state.replace(
-            alive=state.alive.at[kill_type].set(new_alive),
-            score=state.score + score_delta,
-        )
-    return state.replace(score=state.score + score_delta)
+        kill_all = jnp.broadcast_to(mask.any(), state.alive[kill_type].shape)
+        state = prim_kill(state, kill_type, kill_all)
+    return _with_score(state, score_delta)
 
 
 def kill_if_from_above(state, prev_positions, type_a, type_b, mask,
-                       score_change, height, width, **_):
+                       score_change, partner_idx=None, **_):
     if type_b >= 0:
-        _, r_a, c_a = _get_actor_coords(state, type_a, height, width)
-        iprev_b = prev_positions[type_b].astype(jnp.int32)
-        icurr_b = state.positions[type_b].astype(jnp.int32)
-        fell_down = (icurr_b[:, 0] > iprev_b[:, 0]) & state.alive[type_b]
-        from_above_grid = jnp.zeros((height, width), dtype=jnp.bool_)
-        r_curr_b = jnp.clip(icurr_b[:, 0], 0, height - 1)
-        c_curr_b = jnp.clip(icurr_b[:, 1], 0, width - 1)
-        from_above_grid = from_above_grid.at[r_curr_b, c_curr_b].max(fell_down)
-        should_kill = mask & from_above_grid[r_a, c_a]
+        icurr_b = _partner_vals(state.positions[type_b], partner_idx).astype(jnp.int32)
+        iprev_b = _partner_vals(prev_positions[type_b], partner_idx).astype(jnp.int32)
+        should_kill = mask & (partner_idx >= 0) & (icurr_b[:, 0] > iprev_b[:, 0])
     else:
         should_kill = jnp.zeros_like(mask)
-    return _apply_conditional_kill(state, type_a, should_kill, score_change)
+    return _with_score(prim_kill(state, type_a, should_kill),
+                       should_kill.sum() * jnp.int32(score_change))
+
+
+def kill_if_has_less(state, type_a, mask, score_change, kwargs, **_):
+    r_idx = kwargs.get('resource_idx', 0)
+    limit = kwargs.get('limit', 0)
+    should_kill = mask & (state.resources[type_a, :, r_idx] <= limit)
+    return _with_score(prim_kill(state, type_a, should_kill),
+                       should_kill.sum() * jnp.int32(score_change))
+
+
+def kill_if_has_more(state, type_a, mask, score_change, kwargs, **_):
+    r_idx = kwargs.get('resource_idx', 0)
+    limit = kwargs.get('limit', 0)
+    should_kill = mask & (state.resources[type_a, :, r_idx] >= limit)
+    return _with_score(prim_kill(state, type_a, should_kill),
+                       should_kill.sum() * jnp.int32(score_change))
+
+
+def kill_if_other_has_more(state, type_a, type_b, mask, score_change,
+                           kwargs, partner_idx=None, **_):
+    r_idx = kwargs.get('resource_idx', 0)
+    limit = kwargs.get('limit', 0)
+    if type_b >= 0:
+        partner_res = _partner_vals(state.resources[type_b, :, r_idx], partner_idx)
+        partner_res = jnp.where(partner_idx >= 0, partner_res, 0)
+        should_kill = mask & jnp.greater_equal(partner_res, limit)
+    else:
+        should_kill = jnp.zeros_like(mask)
+    return _with_score(prim_kill(state, type_a, should_kill),
+                       should_kill.sum() * jnp.int32(score_change))
+
+
+def kill_if_other_has_less(state, type_a, type_b, mask, score_change,
+                           kwargs, partner_idx=None, **_):
+    r_idx = kwargs.get('resource_idx', 0)
+    limit = kwargs.get('limit', 0)
+    if type_b >= 0:
+        partner_res = _partner_vals(state.resources[type_b, :, r_idx], partner_idx)
+        partner_res = jnp.where(partner_idx >= 0, partner_res, -1)
+        should_kill = mask & (partner_res >= 0) & (partner_res <= limit)
+    else:
+        should_kill = jnp.zeros_like(mask)
+    return _with_score(prim_kill(state, type_a, should_kill),
+                       should_kill.sum() * jnp.int32(score_change))
+
+
+def kill_if_avatar_without_resource(state, type_a, mask, score_change, kwargs, **_):
+    ati = kwargs.get('avatar_type_idx', 0)
+    r_idx = kwargs.get('resource_idx', 0)
+    should_kill = mask & ~(state.resources[ati, 0, r_idx] > 0)
+    return _with_score(prim_kill(state, type_a, should_kill),
+                       should_kill.sum() * jnp.int32(score_change))
 
 
 # ── Position and orientation ───────────────────────────────────────────
 
-
 def step_back(state, prev_positions, type_a, mask, score_delta, **_):
-    new_pos = jnp.where(
-        mask[:, None], prev_positions[type_a], state.positions[type_a])
-    return state.replace(
-        positions=state.positions.at[type_a].set(new_pos),
-        score=state.score + score_delta,
-    )
+    return _with_score(prim_restore_pos(state, type_a, mask, prev_positions), score_delta)
 
 
 def reverse_direction(state, type_a, mask, score_delta, **_):
-    new_ori = jnp.where(
-        mask[:, None], -state.orientations[type_a], state.orientations[type_a])
-    return state.replace(
-        orientations=state.orientations.at[type_a].set(new_ori),
-        score=state.score + score_delta,
-    )
+    return _with_score(prim_negate_orientation(state, type_a, mask), score_delta)
 
 
 def turn_around(state, prev_positions, type_a, mask, score_delta, **_):
-    new_ori = jnp.where(
-        mask[:, None], -state.orientations[type_a], state.orientations[type_a])
-    new_pos = jnp.where(
-        mask[:, None], prev_positions[type_a], state.positions[type_a])
-    return state.replace(
-        orientations=state.orientations.at[type_a].set(new_ori),
-        positions=state.positions.at[type_a].set(new_pos),
-        score=state.score + score_delta,
-    )
+    state = prim_negate_orientation(state, type_a, mask)
+    return _with_score(prim_restore_pos(state, type_a, mask, prev_positions), score_delta)
 
 
 def flip_direction(state, type_a, mask, score_delta, max_n, **_):
     rng, key = jax.random.split(state.rng)
     dir_indices = jax.random.randint(key, (max_n,), 0, 4)
     random_ori = DIRECTION_DELTAS[dir_indices]
-    new_ori = jnp.where(mask[:, None], random_ori, state.orientations[type_a])
-    return state.replace(
-        orientations=state.orientations.at[type_a].set(new_ori),
-        score=state.score + score_delta, rng=rng,
-    )
+    return _with_score(
+        prim_set_orientation(state, type_a, mask, random_ori).replace(rng=rng),
+        score_delta)
 
 
 def undo_all(state, prev_positions, mask, score_delta, **_):
-    any_triggered = mask.any()
-    new_positions = jnp.where(any_triggered, prev_positions, state.positions)
-    return state.replace(positions=new_positions, score=state.score + score_delta)
+    new_positions = jnp.where(mask.any(), prev_positions, state.positions)
+    return _with_score(state.replace(positions=new_positions), score_delta)
 
 
 def wrap_around(state, type_a, mask, score_delta, height, width, **_):
@@ -198,32 +267,26 @@ def wrap_around(state, type_a, mask, score_delta, height, width, **_):
     new_col = jnp.where(
         mask & ~row_axis & (ori[:, 1] < 0), width - 1,
         jnp.where(mask & ~row_axis & (ori[:, 1] > 0), 0, pos[:, 1]))
-    new_pos = jnp.stack([new_row, new_col], axis=-1)
-    return state.replace(
-        positions=state.positions.at[type_a].set(new_pos),
-        score=state.score + score_delta,
-    )
+    return _with_score(state.replace(
+        positions=state.positions.at[type_a].set(
+            jnp.stack([new_row, new_col], axis=-1))), score_delta)
 
 
-def attract_gaze(state, type_a, type_b, mask, score_delta, kwargs, max_n, **_):
+def attract_gaze(state, type_a, type_b, mask, score_delta, kwargs, max_n,
+                 partner_idx=None, **_):
     prob = kwargs.get('prob', 0.5)
     if type_b >= 0:
         rng, key = jax.random.split(state.rng)
         rolls = jax.random.uniform(key, (max_n,))
         should_attract = mask & (rolls < prob)
-        partner_ori = state.orientations[type_b, 0]
-        new_ori = jnp.where(should_attract[:, None],
-                            jnp.broadcast_to(partner_ori, state.orientations[type_a].shape),
-                            state.orientations[type_a])
-        return state.replace(
-            orientations=state.orientations.at[type_a].set(new_ori),
-            score=state.score + score_delta, rng=rng,
-        )
-    return state.replace(score=state.score + score_delta)
+        partner_ori = _partner_vals(state.orientations[type_b], partner_idx)
+        return _with_score(
+            prim_set_orientation(state, type_a, should_attract, partner_ori).replace(rng=rng),
+            score_delta)
+    return _with_score(state, score_delta)
 
 
 # ── Resources ──────────────────────────────────────────────────────────
-
 
 def change_resource(state, type_a, mask, score_delta, kwargs, **_):
     r_idx = kwargs.get('resource_idx', 0)
@@ -231,28 +294,22 @@ def change_resource(state, type_a, mask, score_delta, kwargs, **_):
     limit = kwargs.get('limit', 100)
     cur = state.resources[type_a, :, r_idx]
     new_val = jnp.where(mask, jnp.clip(cur + value, 0, limit), cur)
-    return state.replace(
-        resources=state.resources.at[type_a, :, r_idx].set(new_val),
-        score=state.score + score_delta,
-    )
+    return _with_score(state.replace(
+        resources=state.resources.at[type_a, :, r_idx].set(new_val)), score_delta)
 
 
 def collect_resource(state, type_a, type_b, mask, score_delta,
-                     kwargs, height, width, **_):
+                     kwargs, partner_idx=None, **_):
     r_idx = kwargs.get('resource_idx', 0)
     r_value = kwargs.get('resource_value', 1)
     limit = kwargs.get('limit', 100)
     if type_b >= 0:
-        _, r_a, c_a = _get_actor_coords(state, type_a, height, width)
-        grid_coll = jnp.zeros((height, width), dtype=jnp.bool_)
-        grid_coll = grid_coll.at[r_a, c_a].max(mask)
-        _, r_b, c_b, in_bounds_b = _get_partner_coords(state, type_b, height, width)
-        b_mask = grid_coll[r_b, c_b] & state.alive[type_b] & in_bounds_b
+        b_affected = _partner_scatter_mask(mask, partner_idx, state.alive.shape[1])
         cur = state.resources[type_b, :, r_idx]
-        new_val = jnp.where(b_mask, jnp.clip(cur + r_value, 0, limit), cur)
+        new_val = jnp.where(b_affected, jnp.clip(cur + r_value, 0, limit), cur)
         state = state.replace(
             resources=state.resources.at[type_b, :, r_idx].set(new_val))
-    return state.replace(score=state.score + score_delta)
+    return _with_score(state, score_delta)
 
 
 def avatar_collect_resource(state, mask, score_delta, kwargs, **_):
@@ -260,13 +317,10 @@ def avatar_collect_resource(state, mask, score_delta, kwargs, **_):
     r_idx = kwargs.get('resource_idx', 0)
     r_val = kwargs.get('resource_value', 1)
     limit = kwargs.get('limit', 100)
-    n_collected = mask.sum()
     cur = state.resources[ati, 0, r_idx]
-    new_val = jnp.minimum(cur + n_collected * r_val, limit)
-    return state.replace(
-        resources=state.resources.at[ati, 0, r_idx].set(new_val),
-        score=state.score + score_delta,
-    )
+    new_val = jnp.minimum(cur + mask.sum() * r_val, limit)
+    return _with_score(state.replace(
+        resources=state.resources.at[ati, 0, r_idx].set(new_val)), score_delta)
 
 
 def spend_resource(state, type_a, mask, score_delta, kwargs, **_):
@@ -274,171 +328,69 @@ def spend_resource(state, type_a, mask, score_delta, kwargs, **_):
     amount = kwargs.get('amount', 1)
     cur = state.resources[type_a, :, r_idx]
     spend = jnp.where(mask, jnp.minimum(cur, amount), 0)
-    return state.replace(
-        resources=state.resources.at[type_a, :, r_idx].add(-spend),
-        score=state.score + score_delta,
-    )
+    return _with_score(state.replace(
+        resources=state.resources.at[type_a, :, r_idx].add(-spend)), score_delta)
 
 
 def spend_avatar_resource(state, mask, score_delta, kwargs, **_):
     ati = kwargs.get('avatar_type_idx', 0)
     r_idx = kwargs.get('resource_idx', 0)
     amount = kwargs.get('amount', 1)
-    n_affected = mask.sum()
-    total_spend = n_affected * amount
     cur = state.resources[ati, 0, r_idx]
-    spend = jnp.minimum(cur, total_spend)
-    return state.replace(
-        resources=state.resources.at[ati, 0, r_idx].add(-spend),
-        score=state.score + score_delta,
-    )
-
-
-def _kill_if_resource(state, type_a, mask, score_change, kwargs, compare_fn):
-    """Kill type_a sprites where compare_fn(resource, limit) is true."""
-    r_idx = kwargs.get('resource_idx', 0)
-    limit = kwargs.get('limit', 0)
-    cur = state.resources[type_a, :, r_idx]
-    should_kill = mask & compare_fn(cur, limit)
-    return _apply_conditional_kill(state, type_a, should_kill, score_change)
-
-
-def kill_if_has_less(state, type_a, mask, score_change, kwargs, **_):
-    """Kill type_a if its resource <= limit."""
-    return _kill_if_resource(state, type_a, mask, score_change, kwargs, jnp.less_equal)
-
-
-def kill_if_has_more(state, type_a, mask, score_change, kwargs, **_):
-    """Kill type_a if its resource >= limit."""
-    return _kill_if_resource(state, type_a, mask, score_change, kwargs, jnp.greater_equal)
-
-
-def _kill_if_other_resource(state, type_a, type_b, mask, score_change,
-                            kwargs, height, width, compare_fn, fill_val):
-    """Kill type_a based on type_b's resource level. Shared by has_more/has_less."""
-    r_idx = kwargs.get('resource_idx', 0)
-    limit = kwargs.get('limit', 0)
-    if type_b >= 0:
-        _, r_b, c_b, _ = _get_partner_coords(state, type_b, height, width)
-        res_grid = jnp.full((height, width), fill_val, dtype=jnp.int32)
-        b_res = state.resources[type_b, :, r_idx]
-        res_grid = res_grid.at[r_b, c_b].max(
-            jnp.where(state.alive[type_b], b_res, fill_val))
-        _, r_a, c_a = _get_actor_coords(state, type_a, height, width)
-        partner_res = res_grid[r_a, c_a]
-        should_kill = mask & compare_fn(partner_res, limit)
-    else:
-        should_kill = jnp.zeros_like(mask)
-    return _apply_conditional_kill(state, type_a, should_kill, score_change)
-
-
-def kill_if_other_has_more(state, type_a, type_b, mask, score_change,
-                           kwargs, height, width, **_):
-    """Kill type_a if type_b (partner) has resource >= limit."""
-    return _kill_if_other_resource(
-        state, type_a, type_b, mask, score_change, kwargs, height, width,
-        compare_fn=jnp.greater_equal, fill_val=0)
-
-
-def kill_if_other_has_less(state, type_a, type_b, mask, score_change,
-                           kwargs, height, width, **_):
-    """Kill type_a if type_b (partner) has resource <= limit."""
-    return _kill_if_other_resource(
-        state, type_a, type_b, mask, score_change, kwargs, height, width,
-        compare_fn=lambda r, l: (r >= 0) & (r <= l), fill_val=-1)
-
-
-def kill_if_avatar_without_resource(state, type_a, mask, score_change, kwargs, **_):
-    ati = kwargs.get('avatar_type_idx', 0)
-    r_idx = kwargs.get('resource_idx', 0)
-    avatar_has = state.resources[ati, 0, r_idx] > 0
-    should_kill = mask & ~avatar_has
-    return _apply_conditional_kill(state, type_a, should_kill, score_change)
+    spend = jnp.minimum(cur, mask.sum() * amount)
+    return _with_score(state.replace(
+        resources=state.resources.at[ati, 0, r_idx].add(-spend)), score_delta)
 
 
 # ── Spawn and transform ───────────────────────────────────────────────
 
-
-def _fill_slots(state, target_type, source_mask, src_positions, src_orientations):
-    """Allocate dead slots in target_type and fill with source data."""
-    should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], source_mask)
-    src_pos = src_positions[src_idx]
-    src_ori = src_orientations[src_idx]
-    return state.replace(
-        alive=state.alive.at[target_type].set(state.alive[target_type] | should_fill),
-        positions=state.positions.at[target_type].set(
-            jnp.where(should_fill[:, None], src_pos, state.positions[target_type])),
-        orientations=state.orientations.at[target_type].set(
-            jnp.where(should_fill[:, None], src_ori, state.orientations[target_type])),
-        ages=state.ages.at[target_type].set(
-            jnp.where(should_fill, 0, state.ages[target_type])),
-    )
-
-
-def transform_to(state, prev_positions, type_a, mask, score_delta, kwargs, **_):
+def transform_to(state, type_a, mask, score_delta, kwargs, **_):
     new_type = kwargs['new_type_idx']
-    state = state.replace(
-        alive=state.alive.at[type_a].set(state.alive[type_a] & ~mask),
-        score=state.score + score_delta,
-    )
+    target_speed = kwargs.get('target_speed', None)
+    state = _with_score(prim_kill(state, type_a, mask), score_delta)
     return _fill_slots(state, new_type, mask,
-                        state.positions[type_a], state.orientations[type_a])
+                       state.positions[type_a], state.orientations[type_a],
+                       target_speed=target_speed, reset_cooldown=True)
 
 
-def clone_sprite(state, type_a, mask, score_delta, **_):
+def clone_sprite(state, type_a, mask, score_delta, kwargs=None, **_):
+    target_speed = kwargs.get('target_speed', None) if kwargs else None
     state = _fill_slots(state, type_a, mask,
-                         state.positions[type_a], state.orientations[type_a])
-    return state.replace(score=state.score + score_delta)
+                        state.positions[type_a], state.orientations[type_a],
+                        target_speed=target_speed, reset_cooldown=True)
+    return _with_score(state, score_delta)
 
 
 def spawn_if_has_more(state, type_a, mask, score_delta, kwargs, **_):
     r_idx = kwargs.get('resource_idx', 0)
     limit = kwargs.get('limit', 0)
     spawn_type = kwargs.get('spawn_type_idx', -1)
+    target_speed = kwargs.get('target_speed', None)
     if spawn_type >= 0:
-        cur = state.resources[type_a, :, r_idx]
-        has_enough = mask & (cur >= limit)
-        should_fill, src_idx = prefix_sum_allocate(state.alive[spawn_type], has_enough)
-        src_pos = state.positions[type_a][src_idx]
-        state = state.replace(
-            alive=state.alive.at[spawn_type].set(
-                state.alive[spawn_type] | should_fill),
-            positions=state.positions.at[spawn_type].set(
-                jnp.where(should_fill[:, None], src_pos,
-                          state.positions[spawn_type])),
-            ages=state.ages.at[spawn_type].set(
-                jnp.where(should_fill, 0, state.ages[spawn_type])),
-        )
-    return state.replace(score=state.score + score_delta)
+        has_enough = mask & (state.resources[type_a, :, r_idx] >= limit)
+        state = _fill_slots(state, spawn_type, has_enough,
+                            state.positions[type_a],
+                            target_speed=target_speed, reset_cooldown=True)
+    return _with_score(state, score_delta)
 
 
 def transform_others_to(state, type_a, mask, score_delta, kwargs, **_):
     target_type = kwargs.get('target_type_idx', -1)
     new_type = kwargs.get('new_type_idx', -1)
+    target_speed = kwargs.get('target_speed', None)
     if target_type >= 0 and new_type >= 0:
         any_collision = mask.any()
         target_alive = state.alive[target_type] & any_collision
-        new_target_alive = jnp.where(any_collision,
-                                      jnp.zeros_like(state.alive[target_type]),
-                                      state.alive[target_type])
-        should_fill, src_idx = prefix_sum_allocate(state.alive[new_type], target_alive)
-        src_pos = state.positions[target_type][src_idx]
-        src_ori = state.orientations[target_type][src_idx]
-        state = state.replace(
-            alive=state.alive.at[target_type].set(new_target_alive)
-                       .at[new_type].set(state.alive[new_type] | should_fill),
-            positions=state.positions.at[new_type].set(
-                jnp.where(should_fill[:, None], src_pos, state.positions[new_type])),
-            orientations=state.orientations.at[new_type].set(
-                jnp.where(should_fill[:, None], src_ori, state.orientations[new_type])),
-            ages=state.ages.at[new_type].set(
-                jnp.where(should_fill, 0, state.ages[new_type])),
-        )
-    return state.replace(score=state.score + score_delta)
+        kill_all = jnp.broadcast_to(any_collision, state.alive[target_type].shape)
+        state = prim_kill(state, target_type, kill_all)
+        state = _fill_slots(state, new_type, target_alive,
+                            state.positions[target_type],
+                            state.orientations[target_type],
+                            target_speed=target_speed, reset_cooldown=True)
+    return _with_score(state, score_delta)
 
 
 # ── Movement and conveying ─────────────────────────────────────────────
-
 
 def teleport_to_exit(state, type_a, mask, score_delta, kwargs, **_):
     exit_type = kwargs.get('exit_type_idx', -1)
@@ -447,60 +399,47 @@ def teleport_to_exit(state, type_a, mask, score_delta, kwargs, **_):
         exit_pos = state.positions[exit_type]
         exit_alive = state.alive[exit_type]
         n_exits = exit_alive.sum()
-        rand_idx = jax.random.randint(key, (), 0, jnp.maximum(n_exits, 1))
-        exit_rank = jnp.cumsum(exit_alive)
-        chosen = exit_alive & (exit_rank == rand_idx + 1)
-        chosen_idx = jnp.argmax(chosen)
-        target_pos = exit_pos[chosen_idx]
+        exit_rank = jnp.cumsum(exit_alive)         # [n_exit_slots]
+        max_n = mask.shape[0]
+
+        # Per-sprite independent random exit, fully vectorized (no vmap).
+        # rand_indices: [max_n] ints in [0, n_exits)
+        rand_indices = jax.random.randint(key, (max_n,), 0, jnp.maximum(n_exits, 1))
+        # matches[i, j] = exit_alive[j] & (exit_rank[j] == rand_indices[i] + 1)
+        matches = exit_alive[None, :] & (exit_rank[None, :] == rand_indices[:, None] + 1)
+        chosen_slots = jnp.argmax(matches, axis=1)  # [max_n]
+        targets = exit_pos[chosen_slots]             # [max_n, 2]
+
         pos_a = state.positions[type_a]
-        new_pos = jnp.where(mask[:, None] & (n_exits > 0), target_pos, pos_a)
-        return state.replace(
-            positions=state.positions.at[type_a].set(new_pos),
-            score=state.score + score_delta, rng=rng,
-        )
-    return state.replace(score=state.score + score_delta)
+        new_pos = jnp.where(mask[:, None] & (n_exits > 0), targets, pos_a)
+        return _with_score(state.replace(
+            positions=state.positions.at[type_a].set(new_pos), rng=rng), score_delta)
+    return _with_score(state, score_delta)
 
 
 def convey_sprite(state, type_a, type_b, mask, score_delta,
-                  kwargs, height, width, **_):
+                  kwargs, partner_idx=None, **_):
     strength = kwargs.get('strength', 1.0)
     if type_b >= 0:
-        ipos_b, r_b, c_b, in_bounds_b = _get_partner_coords(
-            state, type_b, height, width)
-        ori_grid = jnp.zeros((height, width, 2), dtype=jnp.float32)
-        alive_b = state.alive[type_b] & in_bounds_b
-        ori_grid = ori_grid.at[r_b, c_b].set(
-            jnp.where(alive_b[:, None], state.orientations[type_b], jnp.zeros(2)))
-        pos_a = state.positions[type_a]
-        ipos_a = pos_a.astype(jnp.int32)
-        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
-        partner_ori = ori_grid[r_a, c_a]
-        new_pos = jnp.where(mask[:, None], pos_a + partner_ori * strength, pos_a)
-    else:
-        new_pos = state.positions[type_a]
-    return state.replace(
-        positions=state.positions.at[type_a].set(new_pos),
-        score=state.score + score_delta,
-    )
+        partner_ori = _partner_vals(state.orientations[type_b], partner_idx)
+        valid = (partner_idx >= 0) & mask
+        state = prim_move(state, type_a, valid, partner_ori * strength)
+    return _with_score(state, score_delta)
 
 
-def wind_gust(state, type_a, type_b, mask, score_delta, max_n, **_):
+def wind_gust(state, type_a, type_b, mask, score_delta, max_n,
+              partner_idx=None, kwargs=None, **_):
+    if kwargs is None:
+        kwargs = {}
     if type_b >= 0:
         rng, key = jax.random.split(state.rng)
+        strength = kwargs.get('strength', 1.0)
         offsets = jax.random.randint(key, (max_n,), -1, 2)
-        base_strength = state.speeds[type_b]
-        per_sprite = (base_strength[:max_n] + offsets.astype(jnp.float32))
-        partner_ori = state.orientations[type_b, 0]
-        delta = partner_ori[None, :] * per_sprite[:, None]
-        new_pos = jnp.where(mask[:, None],
-                            state.positions[type_a] + delta,
-                            state.positions[type_a])
-        return state.replace(
-            positions=state.positions.at[type_a].set(new_pos),
-            score=state.score + score_delta, rng=rng,
-        )
-    return state.replace(score=state.score + score_delta)
+        per_sprite = strength + offsets.astype(jnp.float32)
+        partner_ori = _partner_vals(state.orientations[type_b], partner_idx)
+        state = prim_move(state, type_a, mask, partner_ori * per_sprite[:, None])
+        return _with_score(state.replace(rng=rng), score_delta)
+    return _with_score(state, score_delta)
 
 
 def slip_forward(state, type_a, mask, score_delta, kwargs, max_n, **_):
@@ -508,44 +447,29 @@ def slip_forward(state, type_a, mask, score_delta, kwargs, max_n, **_):
     rng, key = jax.random.split(state.rng)
     rolls = jax.random.uniform(key, (max_n,))
     should_slip = mask & (rolls < prob)
-    delta = state.orientations[type_a]
-    new_pos = jnp.where(should_slip[:, None],
-                        state.positions[type_a] + delta,
-                        state.positions[type_a])
-    return state.replace(
-        positions=state.positions.at[type_a].set(new_pos),
-        score=state.score + score_delta, rng=rng,
-    )
+    state = prim_move(state, type_a, should_slip, state.orientations[type_a])
+    return _with_score(state.replace(rng=rng), score_delta)
 
 
 # ── Physics / wall interactions ────────────────────────────────────────
 
-
 def partner_delta(state, prev_positions, type_a, type_b, mask,
-                  height, width, score_delta, **_):
+                  height, width, score_delta, partner_idx=None, **_):
     """Apply type_b's movement delta to type_a (bounceForward / pullWithIt)."""
     if type_b >= 0:
-        b_delta = (state.positions[type_b] - prev_positions[type_b]).astype(jnp.int32)
-        _, r_b, c_b, _ = _get_partner_coords(state, type_b, height, width)
-        delta_grid = jnp.zeros((height, width, 2), dtype=jnp.int32)
-        alive_b_expanded = (state.alive[type_b])[:, None]
-        delta_grid = delta_grid.at[r_b, c_b].set(
-            jnp.where(alive_b_expanded, b_delta, 0))
-        pos_a = state.positions[type_a]
-        ipos_a = pos_a.astype(jnp.int32)
-        r_a = jnp.clip(ipos_a[:, 0], 0, height - 1)
-        c_a = jnp.clip(ipos_a[:, 1], 0, width - 1)
-        pd = delta_grid[r_a, c_a]
-        new_pos = jnp.where(mask[:, None], pos_a + pd, pos_a)
+        b_curr = _partner_vals(state.positions[type_b], partner_idx)
+        b_prev = _partner_vals(prev_positions[type_b], partner_idx)
+        b_delta = (b_curr - b_prev).astype(jnp.int32)
+        valid = (partner_idx >= 0) & mask
+        new_pos = jnp.where(valid[:, None],
+                            state.positions[type_a] + b_delta,
+                            state.positions[type_a])
         new_pos = jnp.clip(new_pos,
                            jnp.array([0, 0]),
                            jnp.array([height - 1, width - 1]))
-    else:
-        new_pos = state.positions[type_a]
-    return state.replace(
-        positions=state.positions.at[type_a].set(new_pos),
-        score=state.score + score_delta,
-    )
+        state = state.replace(
+            positions=state.positions.at[type_a].set(new_pos))
+    return _with_score(state, score_delta)
 
 
 def wall_stop(state, prev_positions, type_a, type_b, mask,
@@ -564,13 +488,10 @@ def wall_stop(state, prev_positions, type_a, type_b, mask,
     m = mask[:eff_a]
 
     if static_b_grid_idx is not None:
-        # Static grid path: find wall cell in movement direction
         grid_b = state.static_grids[static_b_grid_idx]
         delta_d = pos - prev
-        # Movement direction (velocity fallback when delta is zero)
         going_down = jnp.where(delta_d[:, 0] != 0, delta_d[:, 0] > 0, vel[:, 0] >= 0)
         going_right = jnp.where(delta_d[:, 1] != 0, delta_d[:, 1] > 0, vel[:, 1] >= 0)
-        # Wall cell: ceil in forward dir, floor in backward dir
         r_wall = jnp.where(going_down,
                            jnp.ceil(pos[:, 0]).astype(jnp.int32),
                            jnp.floor(pos[:, 0]).astype(jnp.int32))
@@ -591,7 +512,7 @@ def wall_stop(state, prev_positions, type_a, type_b, mask,
         pos_b = state.positions[type_b, :eff_b]
         alive_b = state.alive[type_b, :eff_b]
         threshold = 1.0 - AABB_EPS
-        v_rdiff = jnp.abs(pos[:, None, 0] - pos_b[None, :, 0])   # [eff_a, eff_b]
+        v_rdiff = jnp.abs(pos[:, None, 0] - pos_b[None, :, 0])
         v_cdiff = jnp.abs(prev[:, None, 1] - pos_b[None, :, 1])
         check_v = (v_rdiff < threshold) & (v_cdiff < threshold) & alive_b[None, :]
         h_rdiff = jnp.abs(prev[:, None, 0] - pos_b[None, :, 0])
@@ -609,14 +530,13 @@ def wall_stop(state, prev_positions, type_a, type_b, mask,
     has_row_cross = has_row_cross | (neither & is_vert_fb)
     has_col_cross = has_col_cross | (neither & ~is_vert_fb)
 
-    # Vertical collision
     vert_mask = m & has_row_cross
     if static_b_grid_idx is not None:
         flush_row = jnp.where(going_down, wall_row_v - 1.0, wall_row_v + 1.0)
         new_pos_row = jnp.where(vert_mask, flush_row, pos[:, 0])
     elif type_b >= 0:
         v_dist = jnp.where(check_v, v_rdiff, 1e10)
-        nearest_v = jnp.argmin(v_dist, axis=1)     # [eff_a] indices into [eff_b]
+        nearest_v = jnp.argmin(v_dist, axis=1)
         wall_row = pos_b[nearest_v, 0]
         flush_row = jnp.where(vel[:, 0] > 0, wall_row - 1.0, wall_row + 1.0)
         new_pos_row = jnp.where(vert_mask, flush_row, pos[:, 0])
@@ -627,14 +547,13 @@ def wall_stop(state, prev_positions, type_a, type_b, mask,
     new_vel_col_v = jnp.where(
         vert_mask & (friction > 0), vel[:, 1] * (1.0 - friction), vel[:, 1])
 
-    # Horizontal collision
     horiz_mask = m & has_col_cross
     if static_b_grid_idx is not None:
         flush_col = jnp.where(going_right, wall_col_h - 1.0, wall_col_h + 1.0)
         new_pos_col = jnp.where(horiz_mask, flush_col, pos[:, 1])
     elif type_b >= 0:
         h_dist = jnp.where(check_h, h_cdiff, 1e10)
-        nearest_h = jnp.argmin(h_dist, axis=1)     # [eff_a] indices into [eff_b]
+        nearest_h = jnp.argmin(h_dist, axis=1)
         wall_col = pos_b[nearest_h, 1]
         flush_col = jnp.where(vel[:, 1] > 0, wall_col - 1.0, wall_col + 1.0)
         new_pos_col = jnp.where(horiz_mask, flush_col, pos[:, 1])
@@ -645,7 +564,6 @@ def wall_stop(state, prev_positions, type_a, type_b, mask,
     new_vel_row2 = jnp.where(
         horiz_mask & (friction > 0), new_vel_row * (1.0 - friction), new_vel_row)
 
-    # Write sliced results back — only first eff_a entries modified
     new_pos_s = jnp.stack([new_pos_row, new_pos_col], axis=-1)
     new_vel_s = jnp.stack([new_vel_row2, new_vel_col], axis=-1)
     new_pf_s = jnp.stack([new_pf_row, new_pf_col], axis=-1)
@@ -671,11 +589,9 @@ def wall_bounce(state, prev_positions, type_a, type_b, mask,
     m = mask[:eff_a]
 
     if static_b_grid_idx is not None:
-        # Static grid path: determine bounce axis from grid cell position
         grid_b = state.static_grids[static_b_grid_idx]
         r_curr = jnp.clip(jnp.round(pos[:, 0]).astype(jnp.int32), 0, height - 1)
         c_curr = jnp.clip(jnp.round(pos[:, 1]).astype(jnp.int32), 0, width - 1)
-        # Nearest wall cell is the one we're overlapping with
         row_diff = jnp.abs(pos[:, 0] - r_curr.astype(jnp.float32))
         col_diff = jnp.abs(pos[:, 1] - c_curr.astype(jnp.float32))
         is_vertical = row_diff >= col_diff
@@ -730,7 +646,6 @@ def bounce_direction(state, prev_positions, type_a, type_b, mask,
         m = mask[:eff_a]
 
         if static_b_grid_idx is not None:
-            # Static grid path: nearest wall is the grid cell we're overlapping
             r_curr = jnp.clip(jnp.round(pos_a[:, 0]).astype(jnp.int32), 0, height - 1)
             c_curr = jnp.clip(jnp.round(pos_a[:, 1]).astype(jnp.int32), 0, width - 1)
             nb_pos = jnp.stack([r_curr.astype(jnp.float32),
@@ -765,25 +680,23 @@ def bounce_direction(state, prev_positions, type_a, type_b, mask,
             orientations=state.orientations.at[type_a, :eff_a].set(new_ori),
             score=state.score + score_delta,
         )
-    return state.replace(score=state.score + score_delta)
+    return _with_score(state, score_delta)
 
 
 # ── Null (unknown effect) ─────────────────────────────────────────────
 
-
 def null(state, score_delta, **_):
-    return state.replace(score=state.score + score_delta)
+    return _with_score(state, score_delta)
 
 
 # ── Dispatch ───────────────────────────────────────────────────────────
-
 
 # Single source of truth: VGDL name → (handler_fn, internal_key)
 EFFECT_REGISTRY = {
     # Kill / removal
     'killSprite':     (kill_sprite,     'kill_sprite'),
     'killBoth':       (kill_both,       'kill_both'),
-    'killIfAlive':    (kill_if_alive,   'kill_if_alive'),
+    'killIfAlive':    (kill_sprite,     'kill_if_alive'),
     'killIfSlow':     (kill_if_slow,    'kill_if_slow'),
     'KillOthers':     (kill_others,     'kill_others'),
     'killIfFromAbove': (kill_if_from_above, 'kill_if_from_above'),
@@ -829,14 +742,11 @@ EFFECT_DISPATCH = {v[1]: v[0] for v in EFFECT_REGISTRY.values()}
 VGDL_TO_KEY = {k: v[1] for k, v in EFFECT_REGISTRY.items()}
 
 
+# ── Static-A handlers ─────────────────────────────────────────────────
+
 def _static_kill_if_other_resource(state, sg_idx, type_b, grid_mask,
                                     score_change, kwargs, height, width,
                                     compare_fn):
-    """Conditionally clear static grid cells based on type_b's resource level.
-
-    Used by kill_if_other_has_more (compare_fn=jnp.greater_equal) and
-    kill_if_other_has_less (compare_fn=jnp.less_equal).
-    """
     r_idx = kwargs.get('resource_idx', 0)
     limit = kwargs.get('limit', 0)
     if type_b >= 0:
@@ -845,35 +755,31 @@ def _static_kill_if_other_resource(state, sg_idx, type_b, grid_mask,
         c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
         ib_b = in_bounds(ipos_b, height, width)
         b_matches = compare_fn(state.resources[type_b, :, r_idx], limit) & state.alive[type_b] & ib_b
-        res_grid = jnp.zeros((height, width), dtype=jnp.bool_)
-        res_grid = res_grid.at[r_b, c_b].max(b_matches)
+        res_grid = jnp.zeros((height, width), dtype=jnp.bool_).at[r_b, c_b].max(b_matches)
         kill_mask = grid_mask & res_grid
     else:
         kill_mask = jnp.zeros_like(grid_mask)
-    n_cond = kill_mask.sum()
-    state = _clear_static_cells(state, sg_idx, kill_mask)
-    return state.replace(
-        score=state.score + n_cond * jnp.int32(score_change))
+    state = prim_clear_static(state, sg_idx, kill_mask)
+    return _with_score(state, kill_mask.sum() * jnp.int32(score_change))
 
 
 def _static_kill_sprite(state, sg_idx, type_b, grid_mask, score_change, kwargs, height, width):
     n_killed = grid_mask.sum()
-    state = _clear_static_cells(state, sg_idx, grid_mask)
-    return state.replace(score=state.score + n_killed * jnp.int32(score_change))
+    state = prim_clear_static(state, sg_idx, grid_mask)
+    return _with_score(state, n_killed * jnp.int32(score_change))
 
 
 def _static_kill_both(state, sg_idx, type_b, grid_mask, score_change, kwargs, height, width):
     n_killed = grid_mask.sum()
-    state = _clear_static_cells(state, sg_idx, grid_mask)
+    state = prim_clear_static(state, sg_idx, grid_mask)
     if type_b >= 0:
         ipos_b = state.positions[type_b].astype(jnp.int32)
         r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
         c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
         ib_b = in_bounds(ipos_b, height, width)
         mask_b = grid_mask[r_b, c_b] & state.alive[type_b] & ib_b
-        state = state.replace(
-            alive=state.alive.at[type_b].set(state.alive[type_b] & ~mask_b))
-    return state.replace(score=state.score + n_killed * jnp.int32(score_change))
+        state = prim_kill(state, type_b, mask_b)
+    return _with_score(state, n_killed * jnp.int32(score_change))
 
 
 def _static_kill_if_other_has_more(state, sg_idx, type_b, grid_mask,
@@ -894,27 +800,24 @@ def _static_kill_if_avatar_without_resource(state, sg_idx, type_b, grid_mask,
                                              score_change, kwargs, height, width):
     ati = kwargs.get('avatar_type_idx', 0)
     r_idx = kwargs.get('resource_idx', 0)
-    avatar_has = state.resources[ati, 0, r_idx] > 0
-    kill_mask = grid_mask & ~avatar_has
-    n_cond = kill_mask.sum()
-    state = _clear_static_cells(state, sg_idx, kill_mask)
-    return state.replace(
-        score=state.score + n_cond * jnp.int32(score_change))
+    kill_mask = grid_mask & ~(state.resources[ati, 0, r_idx] > 0)
+    state = prim_clear_static(state, sg_idx, kill_mask)
+    return _with_score(state, kill_mask.sum() * jnp.int32(score_change))
 
 
 def _static_collect_resource(state, sg_idx, type_b, grid_mask,
                               score_change, kwargs, height, width):
     n_killed = grid_mask.sum()
-    state = _clear_static_cells(state, sg_idx, grid_mask)
+    state = prim_clear_static(state, sg_idx, grid_mask)
     r_idx = kwargs.get('resource_idx', 0)
     r_val = kwargs.get('resource_value', 1)
     limit = kwargs.get('limit', 100)
     ati = kwargs.get('avatar_type_idx', type_b)
     current = state.resources[ati, 0, r_idx]
     new_res = jnp.minimum(current + n_killed * r_val, limit)
-    return state.replace(
-        resources=state.resources.at[ati, 0, r_idx].set(new_res),
-        score=state.score + n_killed * jnp.int32(score_change))
+    return _with_score(state.replace(
+        resources=state.resources.at[ati, 0, r_idx].set(new_res)),
+        n_killed * jnp.int32(score_change))
 
 
 _STATIC_A_HANDLERS = {
@@ -941,16 +844,18 @@ def apply_static_a_effect(state, static_a_grid_idx, type_b, grid_mask,
 def apply_masked_effect(state, prev_positions, type_a, type_b, mask,
                         effect_type, score_change, kwargs,
                         height, width, max_n,
-                        max_a=None, max_b=None):
+                        max_a=None, max_b=None,
+                        partner_idx=None):
     """Apply a single effect to all type_a sprites indicated by mask [max_n].
 
     Both score_delta and score_change are passed to handlers:
       - score_delta = mask.sum() * score_change — pre-computed total for effects
-        that apply to ALL colliding sprites (e.g. kill_sprite, step_back).
+        that apply to ALL colliding sprites.
       - score_change — raw per-sprite value for handlers that conditionally kill a
-        SUBSET of colliders (kill_if_slow, kill_if_from_above, kill_if_has_less/more,
-        kill_if_other_has_more/less, kill_if_avatar_without_resource). These compute
-        their own total from the narrowed mask.
+        SUBSET of colliders.
+
+    partner_idx: optional [max_n] int32 array giving the type_b slot index for each
+      type_a sprite (-1 if no collision).
     """
     n_affected = mask.sum()
     score_delta = n_affected * jnp.int32(score_change)
@@ -962,4 +867,5 @@ def apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         prev_positions=prev_positions, kwargs=kwargs,
         height=height, width=width, max_n=max_n,
         max_a=max_a, max_b=max_b,
+        partner_idx=partner_idx,
     )

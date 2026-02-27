@@ -319,7 +319,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     # Flicker limit — only applies to Flicker/OrientedFlicker classes
     # (For Resource sprites, 'limit' means resource capacity, not expiry)
     if sc in (SpriteClass.FLICKER, SpriteClass.ORIENTED_FLICKER, SpriteClass.SPREADER):
-        flicker_limit = int(args.get('limit', 0))
+        flicker_limit = int(args.get('limit', 1))
     else:
         flicker_limit = 0
 
@@ -486,7 +486,7 @@ def _build_termination_def(class_name, kwargs):
             win=bool(kwargs.get('win', False)),
             score_change=int(kwargs.get('scoreChange', 0)),
             kwargs={
-                'resource': kwargs.get('resource', ''),
+                'resource': kwargs.get('stype', ''),
                 'limit': int(kwargs.get('limit', 0)),
             },
         )

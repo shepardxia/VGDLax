@@ -16,7 +16,7 @@ from vgdl_jax.data_model import (
     GameDef, SpriteClass, TerminationType, PHYSICS_SCALE, STATIC_CLASSES,
     CompiledEffect, AvatarConfig, SpriteConfig,
     DEFAULT_RESOURCE_LIMIT, NOISY_AVATAR_NOISE_LEVEL, GRAVITY_ACCEL,
-    SPRITE_HEADROOM, N_DIRECTIONS,
+    SPRITE_HEADROOM, N_DIRECTIONS, POSITION_MODIFYING_EFFECTS,
 )
 from vgdl_jax.state import GameState, create_initial_state
 from vgdl_jax.step import build_step_fn
@@ -156,10 +156,12 @@ def _find_static_types(game_def):
 def _select_collision_mode(a_static, b_static, a_frac, b_frac, speed_a, speed_b):
     """Select collision detection mode for an effect pair."""
     if a_static and b_static:
+        # Not matched by collision_mode dispatch; step.py uses static_a_grid_idx check instead
         return 'static_both'
     elif b_static:
         return 'static_b_expanded' if a_frac else 'static_b_grid'
     elif a_static:
+        # Not matched by collision_mode dispatch; step.py uses static_a_grid_idx check instead
         return 'static_a_grid'
     elif speed_a > 1.0 or speed_b > 1.0:
         return 'sweep'
@@ -382,12 +384,6 @@ _ALIVE_MODIFYING_EFFECTS = frozenset({
     'transform_to', 'clone_sprite', 'spawn_if_has_more',
 })
 
-_POSITION_MODIFYING_EFFECTS = frozenset({
-    'step_back', 'wall_stop', 'wall_bounce', 'bounce_direction',
-    'bounce_forward', 'pull_with_it', 'wrap_around', 'teleport_to_exit',
-    'convey_sprite', 'wind_gust', 'slip_forward', 'undo_all', 'turn_around',
-})
-
 _MOVING_NPC_CLASSES = frozenset({
     SpriteClass.MISSILE, SpriteClass.ERRATIC_MISSILE, SpriteClass.RANDOM_NPC,
     SpriteClass.CHASER, SpriteClass.FLEEING, SpriteClass.WALKER,
@@ -410,7 +406,7 @@ def _is_chaser_target_stable(target_idx, game_def, sprite_configs,
     if cfg.sprite_class in _MOVING_NPC_CLASSES and sd.speed > 0:
         return False
     # Modified by effects?
-    _ALL_MODIFYING = _ALIVE_MODIFYING_EFFECTS | _POSITION_MODIFYING_EFFECTS
+    _ALL_MODIFYING = _ALIVE_MODIFYING_EFFECTS | POSITION_MODIFYING_EFFECTS
     for eff in compiled_effects:
         if eff.is_eos:
             continue
@@ -600,6 +596,12 @@ def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
         idx = _resolve_first(game_def, ed.kwargs.get('stype', ''))
         if idx is not None:
             kwargs['new_type_idx'] = idx
+            kwargs['target_speed'] = game_def.sprites[idx].speed
+
+    elif et == 'clone_sprite':
+        # Clone creates a new sprite of the same type — use actor's default speed
+        if concrete_actor_idx is not None:
+            kwargs['target_speed'] = game_def.sprites[concrete_actor_idx].speed
 
     elif et == 'change_resource':
         res_name = ed.kwargs.get('resource', '')
@@ -634,12 +636,20 @@ def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
         idx = _resolve_first(game_def, ed.kwargs.get('stype', ''))
         if idx is not None:
             kwargs['spawn_type_idx'] = idx
+            kwargs['target_speed'] = game_def.sprites[idx].speed
 
     elif et == 'slip_forward':
         kwargs['prob'] = float(ed.kwargs.get('prob', 0.5))
 
     elif et == 'attract_gaze':
         kwargs['prob'] = float(ed.kwargs.get('prob', 0.5))
+
+    elif et == 'wind_gust':
+        # Resolve strength from the actee (wind sprite) SpriteDef
+        if concrete_actee_idx is not None:
+            kwargs['strength'] = float(game_def.sprites[concrete_actee_idx].strength)
+        else:
+            kwargs['strength'] = 1.0
 
     elif et == 'spend_resource':
         res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
@@ -674,6 +684,7 @@ def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
         idx = _resolve_first(game_def, ed.kwargs.get('stype', ''))
         if idx is not None:
             kwargs['new_type_idx'] = idx
+            kwargs['target_speed'] = game_def.sprites[idx].speed
 
     elif et in ('wall_stop', 'wall_bounce', 'bounce_direction'):
         if 'friction' in ed.kwargs:
