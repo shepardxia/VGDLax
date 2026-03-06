@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 from vgdl_jax.state import GameState
 from vgdl_jax.collision import detect_eos, in_bounds
-from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES, AABB_THRESHOLD
+from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES, AABB_THRESHOLD, PHYSICS_CONTINUOUS, PHYSICS_GRAVITY
 from vgdl_jax.effects import apply_masked_effect, apply_static_a_effect, POSITION_MODIFYING_EFFECTS, PARTNER_IDX_EFFECTS
 from vgdl_jax.sprites import (
     DIRECTION_DELTAS, spawn_sprite,
@@ -141,14 +141,14 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                 state.cooldown_timers))
 
         # 2. Update avatar (dispatch based on compile-time physics_type)
-        if avatar_config.physics_type == 'continuous':
+        if avatar_config.physics_type == PHYSICS_CONTINUOUS:
             state = update_inertial_avatar(
                 state, action,
                 avatar_type=avatar_config.avatar_type_idx,
                 n_move=avatar_config.n_move_actions,
                 mass=avatar_config.mass,
                 strength=avatar_config.strength)
-        elif avatar_config.physics_type == 'gravity':
+        elif avatar_config.physics_type == PHYSICS_GRAVITY:
             state = update_mario_avatar(
                 state, action,
                 avatar_type=avatar_config.avatar_type_idx,

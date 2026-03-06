@@ -15,6 +15,10 @@ NOISY_AVATAR_NOISE_LEVEL = 0.4      # NoisyRotatingFlippingAvatar noise probabil
 GRAVITY_ACCEL = 1.0 / PHYSICS_SCALE  # standard gravity in grid-cell units
 SPRITE_HEADROOM = 10                 # extra slots per type beyond level count
 
+PHYSICS_GRID = 'grid'
+PHYSICS_CONTINUOUS = 'continuous'
+PHYSICS_GRAVITY = 'gravity'
+
 
 class SpriteClass(enum.IntEnum):
     IMMOVABLE = 0
@@ -72,7 +76,7 @@ class SpriteClassDef:
     n_move_actions: int = 0
     can_shoot: bool = False
     is_horizontal: bool = False
-    physics_type: str = 'grid'
+    physics_type: str = PHYSICS_GRID
     is_rotating: bool = False
     is_flipping: bool = False
     noise_level: float = 0.0
@@ -157,7 +161,7 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         vgdl_names=('RandomInertial',),
         default_speed=1.0,
         is_moving_npc=True,
-        physics_type='continuous',
+        physics_type=PHYSICS_CONTINUOUS,
     ),
     SpriteClass.RANDOM_MISSILE: SpriteClassDef(
         vgdl_names=('RandomMissile',),
@@ -171,7 +175,7 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         vgdl_names=('WalkJumper',),
         default_speed=1.0,
         is_moving_npc=True,
-        physics_type='gravity',
+        physics_type=PHYSICS_GRAVITY,
     ),
 
     # --- Avatar classes ---
@@ -208,12 +212,12 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
     SpriteClass.INERTIAL_AVATAR: SpriteClassDef(
         vgdl_names=('InertialAvatar',),
         is_avatar=True, default_speed=1.0,
-        n_move_actions=4, physics_type='continuous',
+        n_move_actions=4, physics_type=PHYSICS_CONTINUOUS,
     ),
     SpriteClass.MARIO_AVATAR: SpriteClassDef(
         vgdl_names=('MarioAvatar',),
         is_avatar=True, default_speed=1.0,
-        n_move_actions=5, physics_type='gravity',
+        n_move_actions=5, physics_type=PHYSICS_GRAVITY,
     ),
     SpriteClass.ROTATING_AVATAR: SpriteClassDef(
         vgdl_names=('RotatingAvatar',),
@@ -285,7 +289,7 @@ class SpriteDef:
     # Portal fields
     portal_exit_stype: Optional[str] = None  # stype of the exit portal
     # Continuous/gravity physics fields
-    physics_type: str = 'grid'           # 'grid', 'continuous', or 'gravity'
+    physics_type: str = PHYSICS_GRID
     mass: float = 1.0
     strength: float = 1.0               # force multiplier (VGDLSprite default)
     jump_strength: float = 10.0         # MarioAvatar upward impulse
@@ -367,7 +371,7 @@ class AvatarConfig:
     projectile_default_orientation: Tuple[float, float] = (0.0, 0.0)
     projectile_speed: float = 0.0
     direction_offset: int = 0
-    physics_type: str = 'grid'
+    physics_type: str = PHYSICS_GRID
     mass: float = 1.0
     strength: float = 1.0
     jump_strength: float = 1.0

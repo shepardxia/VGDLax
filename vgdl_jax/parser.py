@@ -6,6 +6,7 @@ from collections import defaultdict
 from vgdl_jax.data_model import (
     SpriteClass, TerminationType, STATIC_CLASSES, SPRITE_REGISTRY,
     SpriteDef, EffectDef, TerminationDef, LevelDef, GameDef,
+    PHYSICS_GRID, PHYSICS_CONTINUOUS, PHYSICS_GRAVITY,
 )
 from vgdl_jax.effects import VGDL_TO_KEY
 
@@ -327,17 +328,17 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         portal_exit_stype = args.get('stype', None)
 
     # Physics type inference
-    physics_type = 'grid'
+    physics_type = PHYSICS_GRID
     if sc in (SpriteClass.INERTIAL_AVATAR, SpriteClass.RANDOM_INERTIAL):
-        physics_type = 'continuous'
+        physics_type = PHYSICS_CONTINUOUS
     elif sc in (SpriteClass.MARIO_AVATAR, SpriteClass.WALK_JUMPER):
-        physics_type = 'gravity'
+        physics_type = PHYSICS_GRAVITY
     # Explicit physicstype kwarg overrides
     pt_kwarg = args.get('physicstype', None)
     if pt_kwarg == 'ContinuousPhysics':
-        physics_type = 'continuous'
+        physics_type = PHYSICS_CONTINUOUS
     elif pt_kwarg == 'GravityPhysics':
-        physics_type = 'gravity'
+        physics_type = PHYSICS_GRAVITY
 
     mass = float(args.get('mass', 1.0))
     # MarioAvatar defaults to strength=3, WalkJumper to 10, others to 1

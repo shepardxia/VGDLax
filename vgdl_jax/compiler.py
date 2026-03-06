@@ -18,6 +18,7 @@ from vgdl_jax.data_model import (
     CompiledEffect, AvatarConfig, SpriteConfig,
     DEFAULT_RESOURCE_LIMIT, GRAVITY_ACCEL,
     SPRITE_HEADROOM, N_DIRECTIONS,
+    PHYSICS_CONTINUOUS, PHYSICS_GRAVITY,
 )
 from vgdl_jax.effects import compile_effect_kwargs, CompileContext, ALIVE_MODIFYING_EFFECTS, POSITION_MODIFYING_EFFECTS
 from vgdl_jax.state import GameState, create_initial_state
@@ -260,7 +261,7 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                              avatar_type_idx):
     """Build list of CompiledEffects from game definition."""
     continuous_types = {sd.type_idx for sd in game_def.sprites
-                        if sd.physics_type in ('continuous', 'gravity')}
+                        if sd.physics_type in (PHYSICS_CONTINUOUS, PHYSICS_GRAVITY)}
     fractional_speed_types = {sd.type_idx for sd in game_def.sprites
                                if sd.speed != 1.0 and sd.speed > 0}
     frac_or_cont = continuous_types | fractional_speed_types
