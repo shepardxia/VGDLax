@@ -192,7 +192,7 @@ GVGAI matches 1.0's friction model. 2.0/VGDLx removed it entirely.
 | Engine | Speed calculation | What it measures |
 |--------|-----------------|------------------|
 | **1.0** | `vectNorm(sprite.velocity - partner.velocity)` | Relative velocity vector magnitude |
-| **2.0** | Same formula, but **`relSpeed` vs `relspeed` typo** → crashes for two-moving-sprites | Broken for dynamic pairs |
+| **2.0** | Same formula, but **`relSpeed` vs `relspeed` typo** → `NameError` at runtime for two-moving-sprites | Broken for dynamic pairs |
 | **GVGAI** | `magnitude(sprite1.orientation - sprite2.orientation)` | **Orientation vector divergence** (not speed!) |
 | **VGDLx** | `abs(speed_a - speed_b)` (scalar) | **Speed scalar difference** |
 
@@ -505,34 +505,7 @@ update logic. The GVGAI avatars above would need new movement functions in
 
 ---
 
-## 8. VGDL 2.0 Bugs
-
-### killIfSlow relSpeed/relspeed Typo (HIGH)
-
-**2.0** (`effects.py:185–194`): The `else` branch writes `relSpeed` (capital S)
-but line 193 reads `relspeed` (lowercase s) → `NameError` at runtime.
-
-**1.0** is correct. **GVGAI** uses orientation vectors (different algorithm).
-**VGDLx** sidesteps by using absolute speed (§3.1).
-
----
-
-## 9. VGDL 2.0 Additions (not in 1.0)
-
-**New effects**: `killBoth`, `SpendResource`, `SpendAvatarResource`, `KillOthers`,
-`KillIfAvatarWithoutResource`, `AvatarCollectResource`, `TransformOthersTo`,
-`NullEffect`.
-
-**New avatar**: `ShootEverywhereAvatar` (fires all 4 directions).
-
-**Structural changes**: Centralized `game.random_generator`; monolithic `ontology.py`
-split into `ontology/` package.
-
-All 2.0 additions are implemented in VGDLx.
-
----
-
-## 10. Cross-Engine Validation Results (2.0 ↔ VGDLx)
+## 8. Cross-Engine Validation Results (2.0 ↔ VGDLx)
 
 73/74 cross-engine tests pass. Full suite: 136 passed, 1 failed (zelda step 20),
 2 xfailed.
@@ -577,7 +550,7 @@ No cross-engine validation exists for GVGAI ↔ VGDLx (different languages).
 
 ---
 
-## Appendix A: Engine Lineage
+## Appendix: Engine Lineage
 
 ```
 VGDL Spec (Tom Schaul, 2013)
@@ -590,17 +563,3 @@ VGDL Spec (Tom Schaul, 2013)
 GVGAI and VGDL 1.0 both implement the VGDL spec independently. GVGAI extends
 the spec significantly (health, shields, batch effects, many more effect/avatar
 types). VGDLx is faithful to VGDL 2.0 and does not implement GVGAI extensions.
-
-## Appendix B: Quick Reference — Which Engines Agree?
-
-| Aspect | Agreement Group |
-|--------|----------------|
-| Termination timing | {2.0, GVGAI, jax} (end of tick) vs 1.0 (start) |
-| GridPhysics speed | {1.0, 2.0} (cooldown) vs GVGAI (pixel-scale) vs jax (float multiply) |
-| ContinuousPhysics friction | {1.0, GVGAI} (has friction) vs {2.0, jax} (removed) |
-| Chaser AI | {1.0, 2.0, GVGAI} (greedy random) vs jax (distance field) |
-| killIfSlow | All four differ |
-| turnAround | {1.0, 2.0, GVGAI} (displace+reverse) vs jax (flip only) |
-| transformTo state | {1.0, 2.0} (ori only) vs jax (ori+resources) vs GVGAI (ori+resources+health+player) |
-| once_per_step guards | {1.0, 2.0, GVGAI} (have guards) vs jax (missing) |
-| Collision detection | {1.0, 2.0} (pygame AABB), GVGAI (java AABB), jax (grid/AABB/sweep) |
