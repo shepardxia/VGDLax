@@ -40,7 +40,7 @@ specification but has its own behavioral choices.
 | 18 | pullWithIt once_per_step | {1.0, 2.0, GVGAI} ≠ jax | MODERATE | jax missing guard |
 | 19 | teleportToExit cooldown reset | GVGAI ≠ {1.0, 2.0, jax} | LOW | GVGAI resets cooldown on teleport |
 | 20 | partner_delta int32 truncation | {GVGAI, jax} truncate; {1.0, 2.0} float | MODERATE | GVGAI int pixels; jax explicit cast |
-| 21 | wrapAround offset unsupported | {1.0, 2.0} ≠ jax | LOW | jax ignores offset |
+| 21 | wrapAround offset unsupported | {1.0, 2.0} ≠ {GVGAI, jax} | LOW | Only 1.0/2.0 support offset |
 | **Collision** | | | | |
 | 22 | Collision detection method | all four differ | MINOR | See §5 |
 | 23 | Continuous-physics threshold | GVGAI ≠ 2.0 ≠ jax | MINOR | GVGAI integer AABB |
@@ -48,15 +48,14 @@ specification but has its own behavioral choices.
 | 24 | Chaser pathfinding | {1.0, 2.0, GVGAI} ≠ jax | MODERATE | jax distance field is better |
 | 25 | RandomNPC consecutive moves | GVGAI ≠ {1.0, 2.0, jax} | MODERATE | GVGAI has `cons` param |
 | 26 | SpawnPoint cooldown model | GVGAI ≠ {1.0, 2.0} ≠ jax | MODERATE | 3 distinct models |
-| **Terminations** | | | | |
-| 27 | StopCounter gating | GVGAI only | MODERATE | Not in 1.0/2.0/jax |
-| 28 | count_score on termination | GVGAI only | LOW | Not in 1.0/2.0/jax |
-| **Architecture** | | | | |
-| 29 | Shield/immunity system | GVGAI only | MODERATE | Not in 1.0/2.0/jax |
-| 30 | Batch effect dispatch | GVGAI only | MODERATE | Not in 1.0/2.0/jax |
-| 31 | Time effects (priority queue) | GVGAI only | MODERATE | Not in 1.0/2.0/jax |
-| 32 | Health point system | GVGAI only | MODERATE | Not in 1.0/2.0/jax |
-| 33 | Per-player scoreChange | GVGAI only | LOW | jax/2.0 single score |
+| **GVGAI-Only** | | | | |
+| 27 | StopCounter gating | GVGAI only | MODERATE | |
+| 28 | count_score on termination | GVGAI only | LOW | |
+| 29 | Shield/immunity system | GVGAI only | MODERATE | |
+| 30 | Batch effect dispatch | GVGAI only | MODERATE | |
+| 31 | Time effects (priority queue) | GVGAI only | MODERATE | |
+| 32 | Health point system | GVGAI only | MODERATE | |
+| 33 | Per-player scoreChange | GVGAI only | LOW | |
 
 ---
 
@@ -67,63 +66,41 @@ specification but has its own behavioral choices.
 **1.0**: Terminations checked **at the start** of `tick()`, before sprite updates
 and collision effects.
 
-**2.0** and **VGDLx**: Terminations checked **at the end**, after updates and effects.
+**2.0 / GVGAI / VGDLx**: Checked **at the end**, after updates and effects.
 
-**GVGAI** (`Game.java:1092–1106`): `gameCycle()` runs:
-1. `gameTick++`
-2. `fwdModel.update()` (snapshot)
-3. `tick()` (sprite movement)
-4. `eventHandling()` (collisions + effects)
-5. `clearAll()` (process kill_list)
-6. `terminationHandling()` (check win/loss)
-7. `checkTimeOut()`
-
-GVGAI checks terminations **at the end**, matching 2.0/VGDLx (not 1.0).
-
-For `Timeout(limit=N)`: 1.0 runs N-1 full steps; 2.0/GVGAI/jax run N.
+For `Timeout(limit=N)`: 1.0 runs N-1 full steps; others run N.
 
 ### 1.2 Sprite Update Order (MODERATE)
 
 **1.0 / 2.0**: Sprites updated in `spriteOrder` (z-order, avatar last).
 
-**GVGAI** (`Game.java:1358–1384`): Two-phase update:
-1. Avatars first (explicit loop over `no_players`)
-2. Other sprites in **reverse z-order** (`spriteOrder[]` iterated from end to start)
+**GVGAI** (`Game.java:1358–1384`): Two-phase — avatars first, then other sprites
+in **reverse z-order**.
 
-**VGDLx**: All sprites updated per-type in compiler-defined order. Avatar movement
-is a separate phase before NPC updates.
-
-GVGAI's avatar-first update could cause subtle ordering differences when avatar
-movement triggers effects that affect NPCs updated later in the same tick.
+**VGDLx**: Per-type in compiler-defined order. Avatar movement is a separate
+phase before NPC updates.
 
 ### 1.3 Kill List Clearing (MODERATE)
 
 **1.0 / 2.0**: Dead sprites removed inline during collision handling or at tick end.
 
 **GVGAI** (`Game.java:1667–1691`): Explicit `clearAll()` phase **between**
-`eventHandling()` and `terminationHandling()`. Sprites added to `kill_list` during
-effects remain in the game state until `clearAll()` runs. Effects re-check
-`kill_list` membership before execution (`Game.java:1520`).
+`eventHandling()` and `terminationHandling()`. Effects re-check `kill_list`
+membership before execution.
 
-**VGDLx**: Sprites marked dead via `alive` mask — immediately visible to subsequent
-effects within the same step. No deferred clearing.
+**VGDLx**: Sprites marked dead via `alive` mask — immediately visible to
+subsequent effects. No deferred clearing.
 
-### 1.4 Effect Application Timing (MODERATE) — All Four Differ
+### 1.4 Effect Application Timing (MODERATE)
 
-**1.0**: Effects applied immediately per collision, sequential iteration.
+**1.0 / 2.0**: Sequential per collision pair within one effect type.
 
-**2.0**: Same as 1.0 — sequential per collision pair within one effect type.
+**GVGAI** (`Game.java:1477–1529`): Three-phase: time effects (priority queue),
+edge-of-screen effects, then pairwise collisions. Supports **batch mode**
+(`inBatch` flag) for multi-partner effects.
 
-**GVGAI** (`Game.java:1477–1529`): Three-phase event handling:
-1. Time effects (priority queue)
-2. Edge-of-screen effects
-3. Pairwise collisions — iterates `definedEffects` pairs, for each pair iterates
-   all sprites. Supports **batch mode** (`inBatch` flag) where all colliding
-   partners are passed to `executeBatch()` at once.
-
-**VGDLx**: Same-type effects use `fori_loop` for sequential processing (matching
-2.0). Cross-type effects remain batched (mask-then-apply). Only zelda shows a
-residual: 1 divergent step in 20.
+**VGDLx**: Same-type effects use `fori_loop` for sequential processing. Cross-type
+effects remain batched (mask-then-apply). Zelda: 1 divergent step in 20.
 
 ---
 
@@ -131,202 +108,133 @@ residual: 1 divergent step in 20.
 
 ### 2.1 GridPhysics Speed Model (HIGH) — Three Distinct Models
 
-| Engine | Speed semantics | Cooldown | Position update | Coordinates |
-|--------|----------------|----------|-----------------|-------------|
-| **1.0** | `speed` → cooldown: `1/speed` ticks between moves | Derived from speed | Move 1 cell per allowed tick | Integer (via pygame) |
-| **2.0** | Same as 1.0 | Same as 1.0 | Move 1 cell per allowed tick | Integer (via pygame) |
-| **GVGAI** | `speed` × `gridsize` = pixel displacement per move | Independent `cooldown` field (default varies). `lastmove` incremented each tick; moves when `lastmove >= cooldown`, then resets (`VGDLSprite.java:558–561`) | `rect.translate(orientation * (int)(speed * gridsize.width))` | Integer pixels |
-| **VGDLx** | `speed` = movement multiplier (`delta * speed`) | Per-sprite cooldown timers (for NPCs via `_move_with_cooldown`) | `pos += orientation * speed` | Float32 grid cells |
+| Engine | Speed semantics | Position update | Coordinates |
+|--------|----------------|-----------------|-------------|
+| **1.0 / 2.0** | `speed` → cooldown: `1/speed` ticks between moves | 1 cell per allowed tick | Integer (pygame) |
+| **GVGAI** | `speed` × `gridsize` = pixel displacement; independent `cooldown` field | `rect.translate(orientation * (int)(speed * gridsize.width))` | Integer pixels |
+| **VGDLx** | `speed` = float multiplier (`delta * speed`) | `pos += orientation * speed` | Float32 grid cells |
 
-**Key differences**:
-- 1.0/2.0: Speed and cooldown are **coupled** (speed→cooldown). Always moves 1 cell.
-- GVGAI: Speed and cooldown are **independent**. Speed controls distance (pixel-scaled), cooldown controls frequency. Position is integer pixels.
-- VGDLx: Speed controls distance (float multiplier), cooldown for some NPC types. Position is fractional float32.
-
-For `speed=1.0, cooldown=1`, all engines produce identical 1-cell-per-tick movement.
-
-For fractional speeds (e.g., `speed=0.5`), behavior diverges:
-- 1.0/2.0: Move 1 cell every 2 ticks (cooldown = 2)
-- GVGAI: Move `(int)(0.5×10) = 5` pixels per allowed tick = half a cell (with default gridsize 10, truncated to int)
-- VGDLx: Move 0.5 cells per tick (fractional position, no truncation)
+For `speed=0.5`: 1.0/2.0 move 1 cell every 2 ticks; GVGAI moves 5 pixels per
+tick (half cell, truncated); VGDLx moves 0.5 cells per tick (fractional).
 
 ### 2.2 GravityPhysics.gravity Default (MODERATE)
 
 - **1.0**: `gravity = 0.5`
-- **2.0** / **VGDLx**: `gravity = 1`
-- **GVGAI**: Gravity is a sprite attribute, no global default in physics class.
-  `ContinuousPhysics.java` applies `gravity * mass` as downward acceleration.
+- **2.0 / VGDLx**: `gravity = 1`
+- **GVGAI**: Per-sprite attribute, no global default.
 
-Config-fixable — game file can specify `gravity=X`.
+Config-fixable.
 
 ### 2.3 MarioAvatar.strength Split (MODERATE)
 
 - **1.0**: Single `strength = 10`. Horizontal ≈ 3.16, Jump = -10.
-- **2.0** / **VGDLx**: `strength = 3` + `jump_strength = 10`.
-- **GVGAI**: `ShootAvatar` and `MovingAvatar` use `speed` parameter directly.
-  No `strength`/`jump_strength` split — physics acceleration uses `action / mass`.
+- **2.0 / VGDLx**: `strength = 3` + `jump_strength = 10`.
+- **GVGAI**: Uses `speed` directly. No strength/jump_strength — acceleration = `action / mass`.
 
-Config-fixable where applicable.
+Config-fixable.
 
 ### 2.4 ContinuousPhysics Friction (MODERATE)
 
-- **1.0**: `friction = 0.02`, applied every tick: `speed *= (1 - friction)`.
-- **2.0** / **VGDLx**: No `friction` attribute. Force-based model, no velocity damping.
-- **GVGAI** (`ContinuousPhysics.java:42`): `sprite.speed *= (1 - sprite.friction)`.
-  Exponential velocity decay each tick. Friction is a per-sprite attribute.
-
-GVGAI matches 1.0's friction model. 2.0/VGDLx removed it entirely.
+- **1.0 / GVGAI**: Exponential velocity decay: `speed *= (1 - friction)` each tick.
+- **2.0 / VGDLx**: Friction removed entirely. Force-based model, no damping.
 
 ### 2.5 NoFrictionPhysics (LOW)
 
 - **1.0**: `class NoFrictionPhysics(ContinuousPhysics): friction = 0`
-- **GVGAI**: No separate class — sprites can set `friction = 0` directly.
-- **2.0** / **VGDLx**: Class does not exist (redundant given §2.4 removal).
+- **GVGAI**: No separate class — sprites set `friction = 0` directly.
+- **2.0 / VGDLx**: Class does not exist (redundant given §2.4).
 
 ---
 
 ## 3. Effects — Behavioral Divergences
 
-### 3.1 killIfSlow — All Four Engines Differ (HIGH)
+### 3.1 killIfSlow — All Four Differ (HIGH)
 
 | Engine | Speed calculation | What it measures |
 |--------|-----------------|------------------|
-| **1.0** | `vectNorm(sprite.velocity - partner.velocity)` | Relative velocity vector magnitude |
-| **2.0** | Same formula, but **`relSpeed` vs `relspeed` typo** → `NameError` at runtime for two-moving-sprites | Broken for dynamic pairs |
-| **GVGAI** | `magnitude(sprite1.orientation - sprite2.orientation)` | **Orientation vector divergence** (not speed!) |
+| **1.0** | `vectNorm(sprite.velocity - partner.velocity)` | Relative velocity magnitude |
+| **2.0** | Same formula, but **`relSpeed`/`relspeed` typo** → `NameError` for two-moving-sprites | Broken for dynamic pairs |
+| **GVGAI** | `magnitude(sprite1.orientation - sprite2.orientation)` | **Orientation vector divergence** (not speed) |
 | **VGDLx** | `abs(speed_a - speed_b)` (scalar) | **Speed scalar difference** |
 
-Example — two sprites moving at speed 1, perpendicular directions:
-- **1.0**: `|[1,0] - [0,1]| = √2` → may not kill (high relative velocity)
-- **GVGAI**: `|[1,0] - [0,1]| = √2` → same as 1.0 (coincidence: both use direction vectors)
-- **VGDLx**: `|1.0 - 1.0| = 0` → would kill (same speed, ignores direction)
-
-For static partner (speed=0): all engines reduce to checking actor's absolute speed.
-Divergence only matters with two moving sprites (no standard game exercises this).
+For static partner (speed=0): all reduce to checking actor's absolute speed.
 
 ### 3.2 turnAround (HIGH)
 
-- **1.0 / 2.0**: Restores position, bypasses cooldown, calls `activeMovement(DOWN)`
-  **twice**, reverses direction. Net: 2 cells down + reversed orientation.
-- **GVGAI** (`TurnAround.java:33–39`): Restores to `lastrect`, sets
-  `lastmove = cooldown` (immediate re-move), calls `activeMovement(DOWN)` twice,
-  reverses direction, updates collision dict. Same as 1.0/2.0.
-- **VGDLx**: Negates orientation only. No position restore, no displacement.
-
-All three OOP engines agree; VGDLx is simplified.
+- **1.0 / 2.0 / GVGAI**: Restores position, bypasses cooldown, calls
+  `activeMovement(DOWN)` **twice**, reverses direction. Net: 2 cells down + reversed.
+- **VGDLx**: Negates orientation only. No displacement.
 
 ### 3.3 transformTo State Transfer (HIGH)
 
 | Engine | Copies orientation | Copies resources | Copies health | Copies avatar state |
 |--------|-------------------|-----------------|---------------|-------------------|
-| **1.0** | Yes | No | No | No |
-| **2.0** | Yes | No | No | No |
-| **GVGAI** | Yes (+ `forceOrientation` flag) | **Yes** (all resources) | **Yes** (healthPoints) | **Yes** (player ID, score, win, keyHandler) |
+| **1.0 / 2.0** | Yes | No | No | No |
 | **VGDLx** | Yes | Yes | No | No |
+| **GVGAI** | Yes (+ `forceOrientation`) | Yes | Yes | Yes (player ID, score, win, keyHandler) |
 
-Three-way split. 1.0/2.0 copy only orientation. VGDLx copies orientation +
-resources. GVGAI (`TransformTo.java:59–117`) copies orientation + resources +
-health + avatar identity (player ID, score, win, keyHandler).
-
-### 3.4 wallStop — All Four Differ in Friction/Velocity Handling (MINOR)
+### 3.4 wallStop Friction/Velocity — All Four Differ (MINOR)
 
 | Engine | Friction behavior | Velocity after stop |
 |--------|------------------|---------------------|
 | **1.0** | Scales non-collision axis by `(1 - friction)` | Orientation unchanged |
-| **2.0** | Friction parameter accepted but never applied (dead code) | Orientation unchanged |
-| **GVGAI** | Friction parameter exists but **commented out** (`WallStop.java:65,69`) | **Unique**: recalculates `speed = mag * speed` from surviving orientation component. Gravity floor: if speed < gravity, speed = gravity |
-| **VGDLx** | Scales surviving velocity axis by `(1 - friction)` | Speed unchanged |
+| **2.0** | Friction accepted but never applied (dead code) | Orientation unchanged |
+| **GVGAI** | Friction **commented out** | Recalculates `speed = mag * speed` from surviving component; gravity floor |
+| **VGDLx** | Scales surviving axis by `(1 - friction)` | Speed unchanged |
 
-No standard game specifies `friction` on wallStop. GVGAI's velocity recalculation
-(`WallStop.java:73–79`) is the most significant behavioral difference — it
-adjusts the scalar speed based on the magnitude of the non-zeroed orientation
-component. For example, if a sprite moving diagonally (orientation `(0.7, 0.7)`)
-hits a vertical wall, the X component is zeroed, `mag = 0.7`, and
-`speed *= 0.7`. The other engines leave speed unchanged.
+No standard game uses `friction` on wallStop.
 
 ### 3.5 wallStop once_per_step Guard (MODERATE)
 
-- **1.0 / 2.0**: `once_per_step()` prevents double-application per sprite per tick.
-- **GVGAI** (`WallStop.java:45–54`): Tracks `lastGameTime` + `spritesThisCycle`
-  list — fires once per sprite per game tick.
-- **VGDLx**: No equivalent guard. Effects fire per `(type_a, type_b)` pair.
-  Correct for single wall type; may double-fire with multiple wall types.
+- **1.0 / 2.0 / GVGAI**: Once-per-sprite-per-tick guard prevents double-application.
+- **VGDLx**: No guard. May double-fire with multiple wall types.
 
 ### 3.6 wallStop Position Correction (MINOR)
 
 - **1.0 / 2.0**: Pixel-precise `pygame.Rect.clip()`.
-- **GVGAI** (`WallStop.java:57–79`): `calculatePixelPerfect()` + axis detection
-  (horizontal vs vertical collision by center distance). Zeros collision-axis
-  velocity and **preserves sliding magnitude** on the perpendicular axis.
-- **VGDLx**: `wall_pos ± 1.0` in grid-cell coordinates. No magnitude preservation.
+- **GVGAI**: `calculatePixelPerfect()` + axis detection. Zeros collision-axis
+  velocity and **preserves sliding magnitude** on perpendicular axis.
+- **VGDLx**: `wall_pos ± 1.0` in grid-cell coordinates.
 
 ### 3.7 wallBounce Batch Handling (MODERATE)
 
 - **1.0 / 2.0**: Per-pair sequential, `once_per_step` guard.
-- **GVGAI** (`WallBounce.java:29,51–69`): `inBatch = true`. `executeBatch()`
-  sorts colliding partners by proximity, synthesizes unified collision boundary,
-  then bounces against it. Also applies upward force if sprite has gravity.
-- **VGDLx**: Per-pair via `partner_idx`, center-to-center axis determination.
-  No batch mode, no proximity sorting.
+- **GVGAI**: `executeBatch()` sorts partners by proximity, synthesizes unified
+  collision boundary. Also applies upward force if sprite has gravity.
+- **VGDLx**: Per-pair via `partner_idx`, center-to-center axis. No batch mode.
 
-### 3.8 pullWithIt — ContinuousPhysics Handling (MODERATE)
+### 3.8 pullWithIt (MODERATE)
 
-- **1.0 / 2.0**: Applies partner's position delta + sets `speed = partner.speed`
-  and `orientation = partner.lastdirection` for ContinuousPhysics. Uses
-  `once_per_step` guard.
-- **GVGAI** (`PullWithIt.java:63–91`): Same plus: if sprite uses ContinuousPhysics,
-  forces Y position to `partner.rect.y - partner.rect.height` (above partner) and
-  zeros X orientation. Supports `pixelPerfect` snapping.
-- **VGDLx**: Position delta only. No speed/orientation update, no once_per_step,
-  no ContinuousPhysics handling.
+- **1.0 / 2.0**: Position delta + `speed = partner.speed` + `orientation =
+  partner.lastdirection` for ContinuousPhysics. `once_per_step` guard.
+- **GVGAI**: Same plus: forces Y position above partner and zeros X orientation
+  for ContinuousPhysics. Supports `pixelPerfect`.
+- **VGDLx**: Position delta only. No speed/orientation update, no once_per_step.
 
 ### 3.9 teleportToExit — Cooldown Reset (LOW)
 
-| Engine | Copies position | Copies orientation | Resets cooldown |
-|--------|----------------|-------------------|-----------------|
-| **1.0 / 2.0** | Yes | Yes (if exit is oriented) | No |
-| **GVGAI** | Yes | Yes (if exit is oriented) | Yes (`lastmove = 0`) |
-| **VGDLx** | Yes | Yes | No |
-
 All engines copy position and exit orientation. GVGAI additionally resets
-cooldown (`lastmove = 0`) on teleport, allowing immediate movement after
-arriving at the exit portal.
+cooldown (`lastmove = 0`), allowing immediate movement after teleport.
 
 ### 3.10 partner_delta int32 Truncation (MODERATE)
 
-- **1.0**: Float position deltas.
-- **2.0**: Float position deltas.
-- **GVGAI**: Integer pixel deltas (positions are `Rectangle` with int coords).
-- **VGDLx**: `(b_curr - b_prev).astype(jnp.int32)` truncates fractional deltas.
+- **1.0 / 2.0**: Float position deltas (sub-integer precision preserved).
+- **GVGAI / VGDLx**: Integer truncation (GVGAI by int storage, VGDLx by explicit cast).
 
-GVGAI and VGDLx both lose sub-integer precision (GVGAI by integer storage, VGDLx
-by explicit truncation). 1.0/2.0 preserve float precision.
+### 3.11 Chaser Pathfinding (MODERATE)
 
-### 3.11 Chaser Tie-Breaking (MODERATE)
-
-| Engine | Algorithm | Tiebreak | Sees walls? |
-|--------|-----------|----------|-------------|
-| **1.0** | Greedy 1-step Manhattan | Random | No |
-| **2.0** | Greedy 1-step Manhattan | Random | No |
-| **GVGAI** | Greedy 1-step Manhattan | Random | No |
-| **VGDLx** | Distance field relaxation | Deterministic | **Yes** |
-
-GVGAI matches 1.0/2.0 exactly. VGDLx accepted as design improvement.
+- **1.0 / 2.0 / GVGAI**: Greedy 1-step Manhattan, random tiebreak, no wall awareness.
+- **VGDLx**: Distance field relaxation — routes around walls, deterministic tiebreak.
 
 ### 3.12 collectResource — Kill Configurability (LOW)
 
-- **1.0 / 2.0**: Always kills resource sprite on successful collection.
-- **GVGAI** (`CollectResource.java`): Has configurable `killResource` flag —
-  can collect without destroying the resource sprite.
-- **VGDLx**: Always kills on success (matches 1.0/2.0).
+- **GVGAI**: Configurable `killResource` flag — can collect without destroying.
+- **Others**: Always kills resource sprite on success.
 
 ### 3.13 wrapAround offset (LOW)
 
 - **1.0 / 2.0**: `offset` parameter shifts wrap destination.
-- **GVGAI** (`WrapAround.java`): No `offset` parameter — wraps to opposite edge.
-- **VGDLx**: `offset` kwarg absorbed by `**_`, never used.
-
-GVGAI and VGDLx both lack offset support. Only 1.0/2.0 implement it.
+- **GVGAI / VGDLx**: No offset support.
 
 ---
 
@@ -334,160 +242,129 @@ GVGAI and VGDLx both lack offset support. Only 1.0/2.0 implement it.
 
 ### 4.1 RandomNPC Consecutive Moves (MODERATE)
 
-- **1.0 / 2.0**: Picks new random direction every move tick.
-- **GVGAI** (`RandomNPC.java`): Has `cons` parameter (default 0). When `cons > 0`,
-  repeats the same direction for `cons` ticks before picking a new random one.
-- **VGDLx**: Picks new random direction every move tick (matches 1.0/2.0).
-
-GVGAI is the only engine with this feature.
+- **GVGAI**: `cons` parameter (default 0) repeats same direction for `cons` ticks.
+- **Others**: New random direction every move tick.
 
 ### 4.2 SpawnPoint Cooldown Model (MODERATE)
 
 | Engine | Cooldown model |
 |--------|---------------|
-| **1.0** | Global step-count modulo: `step_count % cooldown == 0` |
-| **2.0** | Same as 1.0 |
-| **GVGAI** | Offset-based: `(start_tick + game_tick) % cooldown == 0`, where `start` is initialized on first update |
-| **VGDLx** | Per-sprite cooldown timers: `cooldown_timers[type_idx]` decremented each tick |
-
-Three distinct models. GVGAI's offset-based model means spawn timing depends on
-when the spawner was created. VGDLx's per-sprite model is the most flexible.
+| **1.0 / 2.0** | Global step-count modulo: `step_count % cooldown == 0` |
+| **GVGAI** | Offset-based: `(start_tick + game_tick) % cooldown == 0` |
+| **VGDLx** | Per-sprite cooldown timers decremented each tick |
 
 ### 4.3 Walker NPC (MODERATE)
 
 - **1.0 / 2.0**: Walker with gravity, horizontal movement, direction changes.
-- **GVGAI** (`Walker.java`): Gravity-based walker with `airsteering` parameter
-  (can change direction mid-air). Default `speed = 5`, `max_speed = 5`.
-  Uses `groundIntersects()` for ground detection.
-- **VGDLx**: Has `WALK_JUMPER` sprite class with `update_walk_jumper()`. Horizontal
-  walking + random jumps under gravity. Similar but not identical to GVGAI Walker.
-
-### 4.4 Fleeing NPC
-
-All four engines implement Fleeing as Chaser with inverted behavior. GVGAI
-(`Fleeing.java`) extends `Chaser` with `fleeing = true`. VGDLx uses
-`update_chaser(..., fleeing=True)`.
+- **GVGAI**: Gravity-based with `airsteering` parameter, `groundIntersects()`.
+  Default `speed = 5`, `max_speed = 5`.
+- **VGDLx**: `WALK_JUMPER` sprite class — horizontal walking + random jumps under gravity.
 
 ---
 
 ## 5. Collision Detection
 
-| Engine | Method | Coordinates | Notes |
-|--------|--------|-------------|-------|
-| **1.0** | `pygame.Rect.colliderect()` | Integer pixels | AABB overlap |
-| **2.0** | `pygame.Rect.collidelistall()` | Integer pixels | AABB overlap |
-| **GVGAI** | `Rectangle.intersects()` | Integer pixels | Java AABB overlap |
-| **VGDLx** | Grid occupancy (default) or AABB (`|diff| < 1.0 - 1e-3`) | Float32 grid cells | Per-pair mode selection |
+| Engine | Method | Coordinates |
+|--------|--------|-------------|
+| **1.0 / 2.0** | `pygame.Rect` AABB overlap | Integer pixels |
+| **GVGAI** | `Rectangle.intersects()` AABB | Integer pixels |
+| **VGDLx** | Grid occupancy (default) or AABB (`\|diff\| < 1.0 - 1e-3`) | Float32 grid cells |
 
-VGDLx supports 7 collision modes: `grid`, `expanded_grid_a`/`_b`, `aabb`,
-`sweep`, `static_b_grid`, `static_b_expanded`. Mode selected per compiled effect
-based on sprite physics types. The other three engines use uniform AABB.
+VGDLx supports 7 modes: `grid`, `expanded_grid_a`/`_b`, `aabb`, `sweep`,
+`static_b_grid`, `static_b_expanded`. Mode selected per compiled effect.
 
 ---
 
 ## 6. GVGAI-Only Features
 
-Features present in GVGAI but absent from all Python engines (1.0, 2.0, VGDLx):
+Features present in GVGAI but absent from all Python engines:
 
 ### 6.1 Shield / Immunity System
 
-`ShieldFrom` effect registers immunity: `game.addShield(sprite_type, shield_type,
-effect_hash)`. Game engine checks shields before executing collision effects.
-Enables "sprite X becomes immune to effect Y after collecting shield Z".
+`ShieldFrom` registers immunity: `game.addShield(sprite_type, shield_type,
+effect_hash)`. Engine checks shields before executing collision effects.
 
 ### 6.2 Batch Effect Dispatch
 
-Effects can set `inBatch = true` and override `executeBatch()` to receive all
-colliding partners at once. `WallBounce` and `WallReverse` use this with
-proximity-based sorting for consistent multi-wall collision resolution.
+Effects set `inBatch = true` and override `executeBatch()` to receive all
+colliding partners at once. Used by `WallBounce` and `WallReverse`.
 
 ### 6.3 Time Effects (Priority Queue)
 
-`TimeEffect` class with `timer`, `repeating`, `nextExecution` scheduling. Managed
-via `TreeSet` priority queue in `eventHandling()`. Enables periodic timed events
-independent of collision.
+`TimeEffect` with `timer`, `repeating`, `nextExecution`. Managed via `TreeSet`
+priority queue. Enables periodic events independent of collision.
 
 ### 6.4 Health Point System
 
-`AddHealthPoints`, `AddHealthPointsToMax`, `SubtractHealthPoints` effects.
-`healthPoints` is a sprite attribute separate from resources. Not present in
-any Python VGDL engine.
+`AddHealthPoints`, `AddHealthPointsToMax`, `SubtractHealthPoints`. Separate
+from resources.
 
 ### 6.5 Per-Player Score Changes
 
-`scoreChange` is a comma-separated string parsed per player ID
-(`Effect.getScoreChange(playerID)`). Enables asymmetric scoring in multiplayer.
-Python engines use a single `scoreChange` int.
+`scoreChange` parsed per player ID. Enables asymmetric multiplayer scoring.
 
 ### 6.6 StopCounter Termination
 
-Conditional gating termination — does NOT end game, but sets/clears static
-`Termination.canEnd` flag that gates other terminations. Checks up to 3 sprite
-types against a limit.
+Conditional gating — sets/clears `Termination.canEnd` flag that gates other
+terminations. Checks up to 3 sprite types against a limit.
 
 ### 6.7 count_score Termination Logic
 
-When termination fires with `count_score = true`, winners are determined by
-comparing avatar scores rather than the `win` parameter.
+When `count_score = true`, winners determined by comparing avatar scores.
 
 ### 6.8 Effect `repeat` Field
 
-Effects have `repeat` parameter (default 1) controlling how many times the effect
-fires per collision per step.
+`repeat` parameter (default 1) controls how many times an effect fires per
+collision per step.
 
 ---
 
 ## 7. GVGAI-Only Effects
 
-Effects in GVGAI that are not implemented in VGDLx (37 effects in VGDLx vs ~55 in GVGAI):
+Effects in GVGAI not implemented in VGDLx (37 in VGDLx vs ~55 in GVGAI):
 
-### 7.1 Unary Effects Missing from VGDLx
+### 7.1 Unary Effects
 
-| Effect | GVGAI behavior | Priority |
-|--------|---------------|----------|
-| `AddHealthPoints` | Adds to sprite's healthPoints | LOW (no health system) |
-| `AddHealthPointsToMax` | Adds health, capped at maxHealthPoints | LOW |
-| `SubtractHealthPoints` | Subtracts health, kills at 0 | LOW |
-| `HalfSpeed` | `sprite.speed *= 0.5` | LOW |
-| `KillAll` | Kills all sprites of sprite1's type | MODERATE |
-| `KillIfFast` | Kills if `speed > limspeed` (inverse of killIfSlow) | LOW |
-| `KillIfNotUpright` | Kills if orientation != UP | LOW |
-| `RemoveScore` | Deducts score from all avatars | LOW |
-| `ShieldFrom` | Registers collision immunity | MODERATE (needs shield system) |
-| `SpawnAbove` | Spawns at position offset (0, -1) | LOW |
-| `SpawnBelow` | Spawns at position offset (0, +1) | LOW |
-| `SpawnLeft` | Spawns at position offset (-1, 0) | LOW |
-| `SpawnRight` | Spawns at position offset (+1, 0) | LOW |
-| `SpawnBehind` | Spawns at `-orientation` offset | LOW |
-| `SpawnIfHasLess` | Spawn if resource < limit (inverse of SpawnIfHasMore) | LOW |
-| `SpawnIfCounterSubTypes` | Spawn based on counter of subtypes | LOW |
-| `TransformToRandomChild` | Transform to random subtype in hierarchy | LOW |
-| `UpdateSpawnType` | Dynamically changes a SpawnPoint's target type | LOW |
-| `WaterPhysics` | Applies drag/physics modifier | LOW |
+| Effect | GVGAI behavior |
+|--------|---------------|
+| `AddHealthPoints` | Adds to healthPoints |
+| `AddHealthPointsToMax` | Adds health, capped at max |
+| `SubtractHealthPoints` | Subtracts health, kills at 0 |
+| `HalfSpeed` | `speed *= 0.5` |
+| `KillAll` | Kills all sprites of sprite1's type |
+| `KillIfFast` | Kills if `speed > limspeed` |
+| `KillIfNotUpright` | Kills if orientation != UP |
+| `RemoveScore` | Deducts score from all avatars |
+| `ShieldFrom` | Registers collision immunity |
+| `SpawnAbove/Below/Left/Right/Behind` | Spawns at directional offset |
+| `SpawnIfHasLess` | Spawn if resource < limit |
+| `SpawnIfCounterSubTypes` | Spawn based on subtype counter |
+| `TransformToRandomChild` | Transform to random subtype |
+| `UpdateSpawnType` | Changes SpawnPoint's target type |
+| `WaterPhysics` | Applies drag/physics modifier |
 
-### 7.2 Binary Effects Missing from VGDLx
+### 7.2 Binary Effects
 
-| Effect | GVGAI behavior | Priority |
-|--------|---------------|----------|
-| `AddTimer` | Attaches a timed effect to sprite | LOW (needs time system) |
-| `Align` | Aligns sprite1 position to sprite2 | LOW |
-| `CollectResourceIfHeld` | Collect only if holding specific resource | LOW |
-| `DecreaseSpeedToAll` | Decreases speed of all sprites of type | LOW |
-| `IncreaseSpeedToAll` | Increases speed of all sprites of type | LOW |
-| `SetSpeedForAll` | Sets speed of all sprites of type | LOW |
-| `KillIfFrontal` | Kill if collision is from the front | LOW |
-| `KillIfNotFrontal` | Kill if collision is NOT from front | LOW |
-| `TransformIfCount` | Transform if counter meets threshold | LOW |
-| `TransformToAll` | Transform all type B sprites | LOW |
-| `TransformToSingleton` | Transform ensuring only one instance exists | LOW |
-| `WallReverse` | Wall bounce with orientation reversal + batch | LOW |
+| Effect | GVGAI behavior |
+|--------|---------------|
+| `AddTimer` | Attaches a timed effect |
+| `Align` | Aligns sprite1 position to sprite2 |
+| `CollectResourceIfHeld` | Collect only if holding specific resource |
+| `DecreaseSpeedToAll` | Decreases speed of all sprites of type |
+| `IncreaseSpeedToAll` | Increases speed of all sprites of type |
+| `SetSpeedForAll` | Sets speed of all sprites of type |
+| `KillIfFrontal` | Kill if collision from the front |
+| `KillIfNotFrontal` | Kill if collision NOT from front |
+| `TransformIfCount` | Transform if counter meets threshold |
+| `TransformToAll` | Transform all type B sprites |
+| `TransformToSingleton` | Transform ensuring only one instance |
+| `WallReverse` | Wall bounce with orientation reversal + batch |
 
 ### 7.3 GVGAI Avatar Types Not in VGDLx
 
 | Avatar | GVGAI behavior |
 |--------|---------------|
 | `NullAvatar` | No player control |
-| `AimedAvatar` | Angle-based aiming reticle |
 | `BirdAvatar` | Continuous angle movement (flappy-bird style) |
 | `CarAvatar` | Forward/back + steering |
 | `LanderAvatar` | Lunar lander thrust physics |
@@ -499,40 +376,15 @@ Effects in GVGAI that are not implemented in VGDLx (37 effects in VGDLx vs ~55 i
 | `SpaceshipAvatar` | Rotation + thrust |
 | `WizardAvatar` | Teleportation-based movement |
 
-VGDLx has 14 avatar classes in `SpriteClass` enum but several map to the same
-update logic. The GVGAI avatars above would need new movement functions in
-`sprites.py`.
-
 ---
 
-## 8. Cross-Engine Validation Results (2.0 ↔ VGDLx)
+## 8. Cross-Engine Validation (2.0 ↔ VGDLx)
 
-73/74 cross-engine tests pass. Full suite: 136 passed, 1 failed (zelda step 20),
-2 xfailed.
+100% feature parity with VGDL 2.0 (22 sprite classes, 14 avatar classes, 37
+effects, 4 terminations, 3 physics types).
 
-| Game | Status | Notes |
-|------|--------|-------|
-| Chase | **PASS** | All 20 NOOP steps match |
-| Zelda | 1/20 diverged | Step 20 monsterNormal position (§3 residual) |
-| Aliens | **PASS** | |
-| MissileCommand | **PASS** | |
-| Sokoban | **PASS** | Exact deterministic match |
-| Portals | **PASS** | Fractional-speed RandomNPC matches |
-| BoulderDash | **PASS** | Fractional-speed boulders match |
-| SurviveZombies | **PASS** | |
-| Frogs | **PASS** | Fractional-speed trucks/logs match |
-
-No cross-engine validation exists for GVGAI ↔ VGDLx (different languages).
-
-### Feature Coverage (VGDLx vs VGDL 2.0)
-
-| Category | 2.0 | VGDLx | Coverage |
-|----------|------|----------|----------|
-| Sprite Classes | 22 | 22 | 100% |
-| Avatar Classes | 14 | 14 | 100% |
-| Effects | 37 | 37 | 100% |
-| Terminations | 4 | 4 | 100% |
-| Physics | 3 | 3 | 100% |
+73/74 cross-engine tests pass. 8/9 games exact match. Zelda: 1/20 steps
+diverged (step 20 monsterNormal position — cross-type effect batching residual).
 
 ### Feature Coverage (VGDLx vs GVGAI)
 
@@ -559,7 +411,3 @@ VGDL Spec (Tom Schaul, 2013)
 │       └── VGDLx (JAX, compiled port of 2.0)
 └── GVGAI (Java, independent implementation)
 ```
-
-GVGAI and VGDL 1.0 both implement the VGDL spec independently. GVGAI extends
-the spec significantly (health, shields, batch effects, many more effect/avatar
-types). VGDLx is faithful to VGDL 2.0 and does not implement GVGAI extensions.
