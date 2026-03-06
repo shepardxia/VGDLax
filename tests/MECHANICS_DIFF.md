@@ -30,7 +30,6 @@ specification but has its own behavioral choices.
 | 9 | NoFrictionPhysics removed | {1.0, GVGAI} ≠ {2.0, jax} | LOW | Class absent in 2.0/jax |
 | **Effects** | | | | |
 | 10 | killIfSlow speed calc | all four differ | HIGH | Critical algorithm divergence |
-| 11 | turnAround mechanics | — | ~~HIGH~~ FIXED | jax now matches 1.0/2.0 (2-cell-down displacement) |
 | 12 | transformTo state transfer | GVGAI ≠ {1.0, 2.0} ≠ jax | HIGH | 3-way: 1.0/2.0 ori only; jax ori+resources; GVGAI ori+resources+health+player |
 | 13 | wallStop friction | all four differ | MINOR | No game uses friction kwarg |
 | 14 | wallStop once_per_step | {1.0, 2.0, GVGAI} ≠ jax | MODERATE | jax missing guard |
@@ -38,9 +37,7 @@ specification but has its own behavioral choices.
 | 16 | wallBounce batch handling | GVGAI ≠ {1.0, 2.0, jax} | MODERATE | GVGAI has proximity sort |
 | 17 | pullWithIt ContinuousPhysics | {1.0, 2.0, GVGAI} ≠ jax | MODERATE | jax position-delta only |
 | 18 | pullWithIt once_per_step | {1.0, 2.0, GVGAI} ≠ jax | MODERATE | jax missing guard |
-| 19 | teleportToExit cooldown reset | GVGAI ≠ {1.0, 2.0} | ~~LOW~~ FIXED | jax now resets cooldown (matches GVGAI) |
 | 20 | partner_delta int32 truncation | {GVGAI, jax} truncate; {1.0, 2.0} float | MODERATE | GVGAI int pixels; jax explicit cast |
-| 21 | wrapAround offset | {1.0, 2.0, jax} ≠ GVGAI | ~~LOW~~ FIXED | jax now supports offset (matches 1.0/2.0) |
 | **Collision** | | | | |
 | 22 | Collision detection method | all four differ | MINOR | See §5 |
 | 23 | Continuous-physics threshold | GVGAI ≠ 2.0 ≠ jax | MINOR | GVGAI integer AABB |
@@ -159,12 +156,7 @@ Config-fixable.
 
 For static partner (speed=0): all reduce to checking actor's absolute speed.
 
-### 3.2 turnAround (FIXED)
-
-- **1.0 / 2.0 / GVGAI / VGDLx**: Restores position, displaces 2 cells down,
-  reverses direction. VGDLx now matches (clamped to grid bounds).
-
-### 3.3 transformTo State Transfer (HIGH)
+### 3.2 transformTo State Transfer (HIGH)
 
 | Engine | Copies orientation | Copies resources | Copies health | Copies avatar state |
 |--------|-------------------|-----------------|---------------|-------------------|
@@ -172,7 +164,7 @@ For static partner (speed=0): all reduce to checking actor's absolute speed.
 | **VGDLx** | Yes | Yes | No | No |
 | **GVGAI** | Yes (+ `forceOrientation`) | Yes | Yes | Yes (player ID, score, win, keyHandler) |
 
-### 3.4 wallStop Friction/Velocity — All Four Differ (MINOR)
+### 3.3 wallStop Friction/Velocity — All Four Differ (MINOR)
 
 | Engine | Friction behavior | Velocity after stop |
 |--------|------------------|---------------------|
@@ -183,26 +175,26 @@ For static partner (speed=0): all reduce to checking actor's absolute speed.
 
 No standard game uses `friction` on wallStop.
 
-### 3.5 wallStop once_per_step Guard (MODERATE)
+### 3.4 wallStop once_per_step Guard (MODERATE)
 
 - **1.0 / 2.0 / GVGAI**: Once-per-sprite-per-tick guard prevents double-application.
 - **VGDLx**: No guard. May double-fire with multiple wall types.
 
-### 3.6 wallStop Position Correction (MINOR)
+### 3.5 wallStop Position Correction (MINOR)
 
 - **1.0 / 2.0**: Pixel-precise `pygame.Rect.clip()`.
 - **GVGAI**: `calculatePixelPerfect()` + axis detection. Zeros collision-axis
   velocity and **preserves sliding magnitude** on perpendicular axis.
 - **VGDLx**: `wall_pos ± 1.0` in grid-cell coordinates.
 
-### 3.7 wallBounce Batch Handling (MODERATE)
+### 3.6 wallBounce Batch Handling (MODERATE)
 
 - **1.0 / 2.0**: Per-pair sequential, `once_per_step` guard.
 - **GVGAI**: `executeBatch()` sorts partners by proximity, synthesizes unified
   collision boundary. Also applies upward force if sprite has gravity.
 - **VGDLx**: Per-pair via `partner_idx`, center-to-center axis. No batch mode.
 
-### 3.8 pullWithIt (MODERATE)
+### 3.7 pullWithIt (MODERATE)
 
 - **1.0 / 2.0**: Position delta + `speed = partner.speed` + `orientation =
   partner.lastdirection` for ContinuousPhysics. `once_per_step` guard.
@@ -210,31 +202,20 @@ No standard game uses `friction` on wallStop.
   for ContinuousPhysics. Supports `pixelPerfect`.
 - **VGDLx**: Position delta only. No speed/orientation update, no once_per_step.
 
-### 3.9 teleportToExit — Cooldown Reset (FIXED)
-
-All engines copy position and exit orientation. GVGAI and VGDLx reset
-cooldown on teleport, allowing immediate movement after arrival.
-1.0/2.0 do not reset cooldown.
-
-### 3.10 partner_delta int32 Truncation (MODERATE)
+### 3.8 partner_delta int32 Truncation (MODERATE)
 
 - **1.0 / 2.0**: Float position deltas (sub-integer precision preserved).
 - **GVGAI / VGDLx**: Integer truncation (GVGAI by int storage, VGDLx by explicit cast).
 
-### 3.11 Chaser Pathfinding (MODERATE)
+### 3.9 Chaser Pathfinding (MODERATE)
 
 - **1.0 / 2.0 / GVGAI**: Greedy 1-step Manhattan, random tiebreak, no wall awareness.
 - **VGDLx**: Distance field relaxation — routes around walls, deterministic tiebreak.
 
-### 3.12 collectResource — Kill Configurability (LOW)
+### 3.10 collectResource — Kill Configurability (LOW)
 
 - **GVGAI**: Configurable `killResource` flag — can collect without destroying.
 - **Others**: Always kills resource sprite on success.
-
-### 3.13 wrapAround offset (FIXED)
-
-- **1.0 / 2.0 / VGDLx**: `offset` parameter shifts wrap destination.
-- **GVGAI**: No offset support.
 
 ---
 
