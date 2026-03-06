@@ -22,13 +22,13 @@
 
 **transformTo** (HIGH) — GVGAI copies orientation + resources + health + player state. VGDLx copies orientation + resources only.
 
-**wallStop** — GVGAI: pixel-perfect positioning, velocity recalculation, `once_per_step` guard, friction commented out. VGDLx: `wall_pos ± 1.0`, no guard, applies `(1-friction)` scaling. No game uses friction.
+**wallStop** — GVGAI: pixel-perfect positioning, velocity recalculation, friction commented out. VGDLx: `wall_pos ± 1.0`, applies `(1-friction)` scaling. Both have `once_per_step` guard. No game uses friction.
 
 **wallBounce** — GVGAI: `executeBatch()` sorts by proximity, unified boundary, gravity upforce. VGDLx: per-pair center-to-center axis.
 
-**pullWithIt** — GVGAI: position delta + speed/orientation copy + ContinuousPhysics Y-force + `once_per_step`. VGDLx: position delta only.
+**pullWithIt** — GVGAI: position delta + speed/orientation copy + ContinuousPhysics Y-force. VGDLx: position delta only. Both have `once_per_step` guard.
 
-**collectResource** — GVGAI: configurable `killResource` flag. VGDLx: always kills resource.
+**collectResource** — GVGAI: `killResource` flag bundled in effect. VGDLx: supports `killResource` kwarg; default behavior uses separate `killSprite` rule.
 
 ## Collision
 
@@ -38,7 +38,7 @@ GVGAI: `Rectangle.intersects()`, integer pixels. VGDLx: grid occupancy or AABB (
 
 **Chaser** — GVGAI: greedy 1-step Manhattan, random tiebreak. VGDLx: distance field relaxation, routes around walls (accepted as better).
 
-**RandomNPC** — GVGAI: `cons` param repeats direction for N ticks. VGDLx: always random.
+**RandomNPC** — Both support `cons` param (repeat direction for N ticks). GVGAI default `cons=0`.
 
 **SpawnPoint** — GVGAI: `(start_tick + game_tick) % cooldown`. VGDLx: per-sprite decrementing timers.
 
